@@ -5,6 +5,8 @@ source of truth, Spotify playlists are the derived representation, and SQLite
 stores the mapping needed for safe repeat runs. Python 3.9+ performs API,
 matching, state and synchronization work.
 
+![discogs2spotify Logo](./imgs/Discogs2Spotify_Logo.png)
+
 The tool creates one playlist per unique Discogs release. It uses exact release
 IDs internally, the Discogs tracklist as the playlist order, and release-specific
 artwork and edition metadata. It does not create physical playlist folders:
