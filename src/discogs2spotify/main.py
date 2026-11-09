@@ -236,6 +236,7 @@ def main(argv=None):
         finally:
             state.close()
         report.releases_total = len(collection)
+        report.releases_selected = len(selected)
         report.api_errors += report_errors.api_errors
         report.warnings = report_errors.warnings + report.warnings
         if duplicates:

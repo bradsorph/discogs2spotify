@@ -68,11 +68,11 @@ def print_report(report, dry_run, root_name):
         if report.current_release_id:
             print("Current release: Discogs {}".format(report.current_release_id))
         print(
-            "Completed: {}/{} releases".format(
-                report.releases_completed, report.releases_total
+            "Completed: {}/{} selected releases".format(
+                report.releases_completed, report.releases_selected
             )
         )
-        print("Pending:   {} releases".format(report.releases_pending))
+        print("Pending:   {} selected releases".format(report.releases_pending))
         if report.retry_after is not None:
             hours, remainder = divmod(int(report.retry_after), 3600)
             minutes, seconds = divmod(remainder, 60)
@@ -86,10 +86,10 @@ def print_report(report, dry_run, root_name):
         print("Completed synchronization state has been preserved.")
     elif report.limit_reached:
         print("\nRELEASE LIMIT REACHED")
-        print("Completed: {}/{} releases".format(
-            report.releases_completed, report.releases_total
+        print("Completed: {}/{} selected releases".format(
+            report.releases_completed, report.releases_selected
         ))
-        print("Pending:   {} releases".format(report.releases_pending))
+        print("Pending:   {} selected releases".format(report.releases_pending))
         print("Run the synchronization again to continue pending releases.")
     for warning in report.warnings:
         print("WARNING: {}".format(warning))

@@ -78,6 +78,7 @@ class ReleasePlan:
 @dataclass
 class SyncReport:
     releases_total: int = 0
+    releases_selected: int = 0
     releases_processed: int = 0
     releases_completed: int = 0
     releases_pending: int = 0

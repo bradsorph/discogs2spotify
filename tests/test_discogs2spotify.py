@@ -25,7 +25,12 @@ from discogs2spotify.errors import APIError, SpotifyRateLimitError, SyncError
 from discogs2spotify.matching import match_track, normalize_text
 from discogs2spotify import main as main_module
 from discogs2spotify.metadata import generate_description, playlist_name, stable_hash
-from discogs2spotify.models import DiscogsRelease, DiscogsTrack, TrackCandidate
+from discogs2spotify.models import (
+    DiscogsRelease,
+    DiscogsTrack,
+    SyncReport,
+    TrackCandidate,
+)
 from discogs2spotify.oauth import BASE_SCOPES, SpotifyTokenManager
 from discogs2spotify.reporting import print_report
 from discogs2spotify.spotify import SpotifyClient
@@ -547,6 +552,42 @@ class StateAndSyncTests(unittest.TestCase):
         self.assertTrue(report.sync_paused)
         self.assertEqual(report.pause_reason, "Spotify HTTP 429 without a usable Retry-After value")
         self.assertEqual(report.releases_pending, 1)
+
+    def test_quota_progress_uses_selected_releases_not_collection_total(self):
+        report = SyncReport(
+            releases_total=363,
+            releases_selected=10,
+            releases_skipped=353,
+            releases_pending=10,
+            sync_paused=True,
+            pause_reason="Spotify quota exceeded",
+        )
+        output = StringIO()
+        with redirect_stdout(output):
+            print_report(report, False, "My_collection")
+        rendered = output.getvalue()
+        self.assertIn("Discogs collection: 363 releases", rendered)
+        self.assertIn("Discogs releases skipped: 353", rendered)
+        self.assertIn("Completed: 0/10 selected releases", rendered)
+        self.assertIn("Pending:   10 selected releases", rendered)
+        self.assertNotIn("Completed: 0/363", rendered)
+
+    def test_partial_quota_progress_uses_selected_release_count(self):
+        report = SyncReport(
+            releases_total=363,
+            releases_selected=10,
+            releases_completed=4,
+            releases_pending=6,
+            sync_paused=True,
+            pause_reason="Spotify quota exceeded",
+        )
+        output = StringIO()
+        with redirect_stdout(output):
+            print_report(report, False, "My_collection")
+        rendered = output.getvalue()
+        self.assertIn("Completed: 4/10 selected releases", rendered)
+        self.assertIn("Pending:   6 selected releases", rendered)
+        self.assertNotIn("Completed: 4/363", rendered)
 
     def test_duplicate_discogs_tracks_are_preserved_and_reported(self):
         track_one = DiscogsTrack("7", "A1", 0, "Same Song", "Artist", "Album", 1970)

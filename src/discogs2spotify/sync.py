@@ -431,7 +431,10 @@ def synchronize(
     verbose=False,
     max_releases=None,
 ):
-    report = SyncReport(releases_total=len(all_release_ids))
+    report = SyncReport(
+        releases_total=len(all_release_ids),
+        releases_selected=len(releases),
+    )
     transport = getattr(spotify, "transport", None)
     starting_requests = getattr(transport, "request_count", 0)
     starting_429s = getattr(transport, "rate_limit_count", 0)
