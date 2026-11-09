@@ -1,0 +1,4 @@
+config.json
+.discogs2spotify.sqlite3
+.discogs2spotify.sqlite3-journal
+__pycache__/
