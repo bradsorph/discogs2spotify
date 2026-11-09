@@ -68,6 +68,24 @@ punctuation are passed as one quoted shell argument:
 ./discogs2spotify.sh --sync --exclude For-Sale
 ```
 
+For a large collection, limit each run to a number of not-yet-completed
+releases, then rerun to continue:
+
+```bash
+./discogs2spotify.sh --sync --max-releases 50
+```
+
+Spotify can return HTTP 429 responses. Short rate limits are automatically
+retried using Spotify's `Retry-After` value. The synchronizer does not block
+for longer server-requested waits; it pauses, persists progress in SQLite, and
+returns exit code `3` for a Spotify pause. Spotify quota exhaustion is reported
+separately, along with the server-provided retry delay when available. Run the
+same command again to resume pending releases; successfully matched tracks are
+cached in the state database so a repeat run does not search for them again.
+The SQLite schema is migrated automatically without deleting existing state.
+`--max-releases` is a local pacing option, not a Spotify quota estimate or
+limit.
+
 CLI values override values in `discogs2spotify.conf`. `--folder` replaces the
 configured include list, and `--exclude` replaces the configured exclude list.
 Without an include list, every folder except excluded folders is selected.
@@ -100,7 +118,7 @@ number. The client spaces Spotify requests at least 2 seconds apart by
 default; `SPOTIFY_API_DELAY` can increase that interval. Values below 1.05
 seconds still use a 1.05-second minimum. This pacing reduces bursts but cannot
 prevent a rate limit caused by other app activity or development-mode quota
-buckets. On HTTP 429 the client honors `Retry-After` for short waits and stops
+buckets. On HTTP 429 the client honors `Retry-After` for short waits and pauses
 instead of blocking for more than five minutes. Check the Spotify Developer
 Dashboard's request graph and app quota mode if long 429 windows continue.
 
@@ -132,7 +150,8 @@ existing playlist cover is left untouched.
   Multiple playlists claiming one release are reported and not modified.
 - A managed playlist is changed only when its ordered track URIs, generated
   description, or source artwork hash differs. Missing-track records are saved
-  for later retries; tracks are re-evaluated on each run.
+  for later retries; successful track matches are cached and unresolved tracks
+  are searched again during subsequent passes.
 - SQLite defaults to `~/.config/discogs2spotify/state.db`. A missing state
   database is reconstructed from marked playlists where possible. Dry runs use
   an existing database read-only and do not create one.
@@ -145,6 +164,11 @@ existing playlist cover is left untouched.
   exceptionally long rate-limit waits stop with an actionable error instead
   of blocking for hours. API errors cause a non-zero exit; missing tracks are
   warnings.
+- Completed release signatures, the limited-run cursor, and successful track
+  mappings are stored in SQLite. A limited run continues at the next release;
+  an interrupted release is retried first and can safely reconcile its
+  playlist. Spotify does not publish a fixed request quota; no daily request
+  limit is assumed.
 
 Output includes playlist create/update/exist decisions, cover and description
 statuses, match counts, missing-track details, duplicate/orphan reports, and

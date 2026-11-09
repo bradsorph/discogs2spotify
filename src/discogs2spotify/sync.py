@@ -1,5 +1,6 @@
 import logging
 import hashlib
+import json
 from .artwork import UnusableArtwork, make_spotify_jpeg, select_release_image
 from .errors import APIError, SyncError
 from .matching import match_track, normalize_text
@@ -13,25 +14,66 @@ def _source_signature(track):
     return normalize_text(track.title), normalize_text(track.artist)
 
 
-def _resolve_tracks(release, spotify, previous, settings):
+def _track_cache_signature(track, settings):
+    source = (
+        track.title,
+        track.artist,
+        track.album,
+        track.year,
+        settings["MATCH_THRESHOLD"],
+        settings["AMBIGUOUS_MATCH_ACTION"],
+    )
+    return hashlib.sha256(
+        json.dumps(source, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _resolve_tracks(
+    release, spotify, previous, settings, state, dry_run, report
+):
     matches = []
+    cache_signatures = []
     uris = []
     source_by_uri = {}
     duplicate_count = 0
     for track in release.tracks:
-        candidates = spotify.search_tracks(track)
-        match = match_track(
-            track,
-            candidates,
-            threshold=settings["MATCH_THRESHOLD"],
-            ambiguous_action=settings["AMBIGUOUS_MATCH_ACTION"],
-        )
+        cache_signature = _track_cache_signature(track, settings)
+        cache_signatures.append(cache_signature)
+        cached = previous.get(track.key, {})
+        if (
+            cached.get("status") == "MATCHED"
+            and cached.get("cache_signature") == cache_signature
+            and cached.get("spotify_id")
+            and cached.get("spotify_uri")
+        ):
+            match = TrackMatch(
+                "MATCHED",
+                cached["spotify_id"],
+                cached["spotify_uri"],
+                float(cached.get("score") or 0.0),
+                cached.get("match_method") or "cached match",
+                1,
+            )
+            report.tracks_resolved_from_cache += 1
+        else:
+            report.tracks_searched += 1
+            candidates = spotify.search_tracks(track)
+            match = match_track(
+                track,
+                candidates,
+                threshold=settings["MATCH_THRESHOLD"],
+                ambiguous_action=settings["AMBIGUOUS_MATCH_ACTION"],
+            )
+            if match.status == "MATCHED" and not dry_run and not state.readonly:
+                state.record_track(
+                    release.release_id, track, match, cache_signature
+                )
         LOGGER.debug(
             "Track match release=%s position=%s title=%r candidates=%d result=%s score=%.1f reason=%s",
             track.release_id,
             track.position,
             track.title,
-            len(candidates),
+            match.candidate_count,
             match.status,
             match.score,
             match.reason,
@@ -69,7 +111,7 @@ def _resolve_tracks(release, spotify, previous, settings):
         and not any(previous.get(track.key, {}).get("spotify_uri") for track in release.tracks)
     ):
         uris = []
-    return matches, uris, duplicate_count
+    return matches, uris, duplicate_count, cache_signatures
 
 
 def _image_url(release, config):
@@ -79,9 +121,35 @@ def _image_url(release, config):
     return (image or {}).get("uri") if image else None
 
 
+def _release_sync_signature(release, config):
+    signature = {
+        "release_id": release.release_id,
+        "folder_id": release.folder_id,
+        "folder_name": release.folder_name,
+        "playlist_name": playlist_name(release),
+        "description": stable_hash(generate_description(release, config)),
+        "artwork_url": _image_url(release, config),
+        "tracks": [
+            (
+                track.key,
+                track.position,
+                track.title,
+                track.artist,
+                track.album,
+                track.year,
+                _track_cache_signature(track, config),
+            )
+            for track in release.tracks
+        ],
+    }
+    return hashlib.sha256(
+        json.dumps(signature, sort_keys=True, ensure_ascii=True).encode("utf-8")
+    ).hexdigest()
+
+
 def build_release_plan(
     release, spotify, discogs, state, config, playlists_by_release,
-    unmanaged_names=None,
+    report, dry_run=True, unmanaged_names=None,
 ):
     description = generate_description(release, config)
     description_hash = stable_hash(description)
@@ -137,8 +205,8 @@ def build_release_plan(
         current_tracks = spotify.playlist_tracks(playlist_id)
     current_uris = [track["uri"] for track in current_tracks if track.get("uri")]
     previous_tracks = state.tracks(release.release_id)
-    matches, desired_uris, duplicate_tracks = _resolve_tracks(
-        release, spotify, previous_tracks, config
+    matches, desired_uris, duplicate_tracks, cache_signatures = _resolve_tracks(
+        release, spotify, previous_tracks, config, state, dry_run, report
     )
     has_unresolved = any(match.status != "MATCHED" for match in matches)
     unresolved_without_mapping = any(
@@ -210,6 +278,7 @@ def build_release_plan(
         cover_status=cover_status,
         description_status=description_status,
         duplicate_track_matches=duplicate_tracks,
+        cache_signatures=cache_signatures,
     )
 
 
@@ -239,10 +308,12 @@ def discover_managed_playlists(spotify, state, verbose=False):
     return result, unmanaged_names
 
 
-def _apply_plan(plan, spotify, state, config, dry_run):
+def _apply_plan(
+    plan, spotify, state, config, dry_run, sync_signature, report
+):
     release = plan.release
     playlist_id = plan.playlist_id
-    if dry_run:
+    if dry_run or state.readonly:
         return
     created_now = not playlist_id
     if created_now:
@@ -268,6 +339,7 @@ def _apply_plan(plan, spotify, state, config, dry_run):
     if plan.description_status in ("CREATED", "UPDATED") and not created_now:
         spotify.update_description(playlist_id, plan.description)
         state.update_hashes(release.release_id, description_hash=plan.description_hash)
+        report.description_updates += 1
     elif config["PLAYLIST_DESCRIPTION"] and plan.description_status == "UNCHANGED":
         state.update_hashes(release.release_id, description_hash=plan.description_hash)
 
@@ -275,12 +347,77 @@ def _apply_plan(plan, spotify, state, config, dry_run):
         plan.desired_uris or not release.tracks
     ):
         spotify.replace_tracks(playlist_id, plan.desired_uris)
+    else:
+        report.skipped_operations += 1
 
     if plan.artwork_bytes and plan.cover_status in ("CREATED", "UPDATED"):
         spotify.update_cover(playlist_id, plan.artwork_jpeg)
         plan.artwork_hash = hashlib.sha256(plan.artwork_bytes).hexdigest()
         state.update_hashes(release.release_id, artwork_hash=plan.artwork_hash)
-    state.record_tracks(release.release_id, plan.tracks, plan.matches)
+        report.artwork_updates += 1
+    elif plan.cover_status == "UNCHANGED":
+        report.skipped_operations += 1
+    if plan.description_status == "UNCHANGED":
+        report.skipped_operations += 1
+    state.record_tracks(
+        release.release_id,
+        plan.tracks,
+        plan.matches,
+        plan.cache_signatures,
+    )
+    state.complete_release(release.release_id, sync_signature)
+
+
+def _pause_sync(report, error, state, dry_run, completed, pending, release_id=None):
+    report.sync_paused = True
+    report.current_release_id = release_id
+    report.retry_after = getattr(error, "retry_after", None)
+    retry_at = getattr(error, "retry_at", None)
+    report.retry_at = (
+        retry_at.strftime("%Y-%m-%d %H:%M:%S %Z") if retry_at else None
+    )
+    reason = str(getattr(error, "reason", "") or "").upper()
+    if reason == "QUOTA_EXCEEDED":
+        report.pause_reason = "Spotify quota exceeded"
+        report.quota_exhaustion_pauses += 1
+        LOGGER.error(
+            "Spotify quota exhausted. Synchronization paused until the "
+            "server-provided retry time."
+        )
+    elif report.retry_after is None:
+        report.pause_reason = "Spotify HTTP 429 without a usable Retry-After value"
+        LOGGER.error("%s", report.pause_reason)
+    elif report.retry_after > 300:
+        report.pause_reason = (
+            "Spotify rate limit; server-requested wait exceeds automatic retry"
+        )
+        LOGGER.warning(
+            "Spotify rate limit reached. Synchronization paused; requested wait is %.0f seconds.",
+            report.retry_after,
+        )
+    else:
+        report.pause_reason = "Spotify rate limit persisted after automatic retries"
+        LOGGER.warning(
+            "Spotify rate limit persisted after automatic retries at %s.",
+            getattr(error, "endpoint", "an unknown endpoint"),
+        )
+    report.rate_limit_pauses += 1
+    if report.retry_after is not None:
+        LOGGER.warning(
+            "Spotify requested a retry after %.0f seconds%s",
+            report.retry_after,
+            " (no earlier than {})".format(report.retry_at) if report.retry_at else "",
+        )
+    if not dry_run and not state.readonly:
+        state.update_sync_progress(
+            "PAUSED",
+            reason=report.pause_reason,
+            current_release_id=release_id,
+            retry_after=report.retry_after,
+            retry_at=report.retry_at,
+            completed_releases=completed,
+            pending_releases=pending,
+        )
 
 
 def synchronize(
@@ -292,24 +429,72 @@ def synchronize(
     config,
     dry_run=True,
     verbose=False,
+    max_releases=None,
 ):
     report = SyncReport(releases_total=len(all_release_ids))
+    transport = getattr(spotify, "transport", None)
+    starting_requests = getattr(transport, "request_count", 0)
+    starting_429s = getattr(transport, "rate_limit_count", 0)
+    previous_progress = state.sync_progress()
+    report.releases_skipped = max(0, len(all_release_ids) - len(releases))
+    signatures = {
+        release.release_id: _release_sync_signature(release, config)
+        for release in releases
+    }
+    completed_ids = {
+        release.release_id
+        for release in releases
+        if state.is_release_complete(
+            release.release_id, signatures[release.release_id]
+        )
+    }
+    report.releases_completed = len(completed_ids)
+    report.releases_pending = max(0, len(releases) - len(completed_ids))
+    if not dry_run and not state.readonly:
+        state.update_sync_progress(
+            "RUNNING",
+            completed_releases=report.releases_completed,
+            pending_releases=report.releases_pending,
+        )
+
     LOGGER.info("Checking existing Spotify playlists and managed release markers")
-    managed_playlists, unmanaged_names = discover_managed_playlists(
-        spotify, state, verbose
-    )
+    try:
+        managed_playlists, unmanaged_names = discover_managed_playlists(
+            spotify, state, verbose
+        )
+    except KeyboardInterrupt:
+        if not dry_run and not state.readonly:
+            state.update_sync_progress(
+                "INTERRUPTED",
+                reason="User interrupted synchronization",
+                completed_releases=report.releases_completed,
+                pending_releases=report.releases_pending,
+            )
+        raise
+    except APIError as error:
+        if error.service != "Spotify" or error.status != 429:
+            raise
+        _pause_sync(
+            report,
+            error,
+            state,
+            dry_run,
+            report.releases_completed,
+            report.releases_pending,
+        )
+        managed_playlists, unmanaged_names = {}, {}
     LOGGER.info(
         "Spotify inventory complete: %d managed release mappings",
         len(managed_playlists),
     )
-    report.releases_skipped = max(0, len(all_release_ids) - len(releases))
+
     existing = {str(release_id) for release_id in all_release_ids}
     orphaned_records = [
         record
         for record in state.managed_releases()
         if record["release_id"] not in existing
     ]
-    if config["SYNC_DELETIONS"] and orphaned_records and not dry_run:
+    if config["SYNC_DELETIONS"] and orphaned_records and not dry_run and not state.readonly:
         print(
             "SYNC_DELETIONS enabled: will clear tracks (not delete playlists) from these managed orphans:"
         )
@@ -322,102 +507,187 @@ def synchronize(
                 )
             )
 
-    total = len(releases)
+    if max_releases is not None:
+        start_index = 0
+        if previous_progress:
+            previous_id = previous_progress.get("current_release_id")
+            previous_ids = [release.release_id for release in releases]
+            if previous_id in previous_ids:
+                previous_index = previous_ids.index(previous_id)
+                if previous_progress.get("status") == "LIMIT_REACHED":
+                    start_index = (previous_index + 1) % len(releases)
+                elif previous_progress.get("status") in (
+                    "PAUSED", "RUNNING", "INTERRUPTED"
+                ):
+                    start_index = previous_index
+        ordered = releases[start_index:] + releases[:start_index]
+        releases_to_process = ordered[:max_releases]
+        report.releases_skipped += len(releases) - len(releases_to_process)
+        report.skipped_operations += len(releases) - len(releases_to_process)
+    else:
+        releases_to_process = list(releases)
+
+    total = len(releases_to_process)
     LOGGER.info("Planning %d selected releases", total)
-    for index, release in enumerate(releases, 1):
-        if index == 1 or index % 10 == 0 or index == total:
-            LOGGER.info(
-                "Planning release %d/%d: Discogs %s (%s)",
-                index,
-                total,
-                release.release_id,
-                release.title or "untitled",
-            )
+    if not report.sync_paused:
         try:
-            plan = build_release_plan(
-                release, spotify, discogs, state, config,
-                managed_playlists, unmanaged_names,
-            )
-            report.plans.append(plan)
-            if plan.playlist_action == "COLLISION":
-                report.releases_skipped += 1
-                report.other_errors += 1
-                report.warnings.append(
-                    "Unmanaged playlist name collision for release {} ({}): {}".format(
+            for index, release in enumerate(releases_to_process, 1):
+                if not dry_run and not state.readonly:
+                    state.update_sync_progress(
+                        "RUNNING",
+                        current_release_id=release.release_id,
+                        completed_releases=len(completed_ids),
+                        pending_releases=max(0, len(releases) - len(completed_ids)),
+                    )
+                if index == 1 or index % 10 == 0 or index == total:
+                    LOGGER.info(
+                        "Planning release %d/%d: Discogs %s (%s)",
+                        index,
+                        total,
                         release.release_id,
-                        plan.playlist_name,
-                        ", ".join(plan.unmanaged_name_collisions),
+                        release.title or "untitled",
                     )
-                )
-                continue
-            if plan.playlist_action == "DUPLICATE":
-                report.releases_skipped += 1
-                report.other_errors += 1
-                report.warnings.append(
-                    "Duplicate managed playlists for release {}: {}".format(
-                        release.release_id, ", ".join(plan.duplicate_playlist_ids)
+                try:
+                    plan = build_release_plan(
+                        release,
+                        spotify,
+                        discogs,
+                        state,
+                        config,
+                        managed_playlists,
+                        report,
+                        dry_run,
+                        unmanaged_names,
                     )
-                )
-                continue
-            _apply_plan(plan, spotify, state, config, dry_run)
-            report.releases_processed += 1
-            if plan.playlist_action == "CREATE":
-                report.playlists_created += 1
-            elif plan.playlist_action == "UPDATE":
-                report.playlists_updated += 1
-            else:
-                report.playlists_unchanged += 1
-            report.duplicate_tracks += plan.duplicate_track_matches
-            for track, match in zip(plan.tracks, plan.matches):
-                if match.status == "MATCHED":
-                    report.tracks_matched += 1
-                elif match.status == "MISSING":
-                    report.tracks_missing += 1
-                    if config["MISSING_TRACK_ACTION"] == "report":
+                    report.plans.append(plan)
+                    if plan.playlist_action == "COLLISION":
+                        report.releases_skipped += 1
+                        report.other_errors += 1
                         report.warnings.append(
-                            "MISSING ON SPOTIFY | Discogs release: {} | Artist: {} | Track: {} | Reason: {}".format(
-                                release.release_id, track.artist, track.title, match.reason
+                            "Unmanaged playlist name collision for release {} ({}): {}".format(
+                                release.release_id,
+                                plan.playlist_name,
+                                ", ".join(plan.unmanaged_name_collisions),
                             )
                         )
-                elif match.status == "AMBIGUOUS":
-                    report.tracks_ambiguous += 1
-                elif match.status == "REJECTED":
-                    report.tracks_rejected += 1
-            if verbose:
-                LOGGER.info(
-                    "%s | %s/%s | %s | COVER %s | DESCRIPTION %s",
-                    plan.playlist_action,
-                    release.folder_name,
-                    plan.playlist_name,
-                    release.release_id,
-                    plan.cover_status,
-                    plan.description_status,
+                        continue
+                    if plan.playlist_action == "DUPLICATE":
+                        report.releases_skipped += 1
+                        report.other_errors += 1
+                        report.warnings.append(
+                            "Duplicate managed playlists for release {}: {}".format(
+                                release.release_id,
+                                ", ".join(plan.duplicate_playlist_ids),
+                            )
+                        )
+                        continue
+                    previously_complete = release.release_id in completed_ids
+                    completed_ids.discard(release.release_id)
+                    try:
+                        _apply_plan(
+                            plan,
+                            spotify,
+                            state,
+                            config,
+                            dry_run,
+                            signatures[release.release_id],
+                            report,
+                        )
+                    except (APIError, SyncError, KeyError, ValueError):
+                        if previously_complete and state.is_release_complete(
+                            release.release_id, signatures[release.release_id]
+                        ):
+                            completed_ids.add(release.release_id)
+                        raise
+                    completed_ids.add(release.release_id)
+                    report.releases_processed += 1
+                    if plan.playlist_action == "CREATE":
+                        report.playlists_created += 1
+                    elif plan.playlist_action == "UPDATE":
+                        report.playlists_updated += 1
+                    else:
+                        report.playlists_unchanged += 1
+                    report.duplicate_tracks += plan.duplicate_track_matches
+                    for track, match in zip(plan.tracks, plan.matches):
+                        if match.status == "MATCHED":
+                            report.tracks_matched += 1
+                        elif match.status == "MISSING":
+                            report.tracks_missing += 1
+                            if config["MISSING_TRACK_ACTION"] == "report":
+                                report.warnings.append(
+                                    "MISSING ON SPOTIFY | Discogs release: {} | Artist: {} | Track: {} | Reason: {}".format(
+                                        release.release_id,
+                                        track.artist,
+                                        track.title,
+                                        match.reason,
+                                    )
+                                )
+                        elif match.status == "AMBIGUOUS":
+                            report.tracks_ambiguous += 1
+                        elif match.status == "REJECTED":
+                            report.tracks_rejected += 1
+                    if verbose:
+                        LOGGER.info(
+                            "%s | %s/%s | %s | COVER %s | DESCRIPTION %s",
+                            plan.playlist_action,
+                            release.folder_name,
+                            plan.playlist_name,
+                            release.release_id,
+                            plan.cover_status,
+                            plan.description_status,
+                        )
+                    else:
+                        LOGGER.debug(
+                            "%s release=%s playlist=%s tracks=%d",
+                            plan.playlist_action,
+                            release.release_id,
+                            plan.playlist_name,
+                            len(release.tracks),
+                        )
+                except APIError as error:
+                    if error.service == "Spotify" and error.status == 429:
+                        _pause_sync(
+                            report,
+                            error,
+                            state,
+                            dry_run,
+                            len(completed_ids),
+                            max(0, len(releases) - len(completed_ids)),
+                            release.release_id,
+                        )
+                        break
+                    report.api_errors += 1
+                    report.releases_skipped += 1
+                    report.warnings.append(
+                        "API error for Discogs release {}: {}".format(
+                            release.release_id, error
+                        )
+                    )
+                    LOGGER.error("%s", error)
+                except (SyncError, KeyError, ValueError) as error:
+                    report.other_errors += 1
+                    report.releases_skipped += 1
+                    report.warnings.append(
+                        "Error for Discogs release {}: {}".format(
+                            release.release_id, error
+                        )
+                    )
+                    LOGGER.error("%s", error)
+        except KeyboardInterrupt:
+            if not dry_run and not state.readonly:
+                state.update_sync_progress(
+                    "INTERRUPTED",
+                    reason="User interrupted synchronization",
+                    completed_releases=len(completed_ids),
+                    pending_releases=max(0, len(releases) - len(completed_ids)),
                 )
-            else:
-                LOGGER.debug(
-                    "%s release=%s playlist=%s tracks=%d",
-                    plan.playlist_action,
-                    release.release_id,
-                    plan.playlist_name,
-                    len(release.tracks),
-                )
-        except APIError as error:
-            if error.status == 429:
-                raise
-            report.api_errors += 1
-            report.releases_skipped += 1
-            report.warnings.append(
-                "API error for Discogs release {}: {}".format(release.release_id, error)
-            )
-            LOGGER.error("%s", error)
-        except (SyncError, KeyError, ValueError) as error:
-            report.other_errors += 1
-            report.releases_skipped += 1
-            report.warnings.append(
-                "Error for Discogs release {}: {}".format(release.release_id, error)
-            )
-            LOGGER.error("%s", error)
+            raise
 
+    report.releases_completed = len(completed_ids)
+    report.releases_pending = max(0, len(releases) - len(completed_ids))
+    report.limit_reached = bool(
+        max_releases is not None and report.releases_pending and not report.sync_paused
+    )
     report.orphaned = [
         {
             "release_id": record["release_id"],
@@ -428,22 +698,63 @@ def synchronize(
     ]
     report.playlists_orphaned = len(report.orphaned)
 
-    if config["SYNC_DELETIONS"] and report.orphaned and not dry_run:
-        for orphan in report.orphaned:
-            try:
-                tracks = spotify.playlist_tracks(orphan["playlist_id"])
-                if tracks:
-                    spotify.replace_tracks(orphan["playlist_id"], [])
-                    LOGGER.info(
-                        "Cleared tracks from orphaned managed playlist %s (%s); playlist retained",
-                        orphan["playlist_name"],
-                        orphan["playlist_id"],
+    if config["SYNC_DELETIONS"] and report.orphaned and not dry_run and not state.readonly and not report.sync_paused:
+        try:
+            for orphan in report.orphaned:
+                try:
+                    tracks = spotify.playlist_tracks(orphan["playlist_id"])
+                    if tracks:
+                        spotify.replace_tracks(orphan["playlist_id"], [])
+                        LOGGER.info(
+                            "Cleared tracks from orphaned managed playlist %s (%s); playlist retained",
+                            orphan["playlist_name"],
+                            orphan["playlist_id"],
+                        )
+                except APIError as error:
+                    if error.service == "Spotify" and error.status == 429:
+                        _pause_sync(
+                            report,
+                            error,
+                            state,
+                            dry_run,
+                            report.releases_completed,
+                            report.releases_pending,
+                        )
+                        break
+                    report.api_errors += 1
+                    report.warnings.append(
+                        "Could not clear orphaned playlist {}: {}".format(
+                            orphan["playlist_id"], error
+                        )
                     )
-            except APIError as error:
-                report.api_errors += 1
-                report.warnings.append(
-                    "Could not clear orphaned playlist {}: {}".format(
-                        orphan["playlist_id"], error
-                    )
-                )
+        except KeyboardInterrupt:
+            state.update_sync_progress(
+                "INTERRUPTED",
+                reason="User interrupted synchronization",
+                completed_releases=report.releases_completed,
+                pending_releases=report.releases_pending,
+            )
+            raise
+
+    if not dry_run and not state.readonly and not report.sync_paused:
+        status = (
+            "LIMIT_REACHED" if report.limit_reached
+            else "INCOMPLETE" if report.releases_pending
+            else "COMPLETED"
+        )
+        state.update_sync_progress(
+            status,
+            reason="--max-releases limit reached" if report.limit_reached else None,
+            current_release_id=(
+                releases_to_process[-1].release_id if report.limit_reached else None
+            ),
+            completed_releases=report.releases_completed,
+            pending_releases=report.releases_pending,
+        )
+    report.spotify_api_requests = (
+        getattr(transport, "request_count", starting_requests) - starting_requests
+    )
+    report.http_429_responses = (
+        getattr(transport, "rate_limit_count", starting_429s) - starting_429s
+    )
     return report

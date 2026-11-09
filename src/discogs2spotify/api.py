@@ -1,3 +1,4 @@
+import math
 import time
 import json
 import logging
@@ -6,7 +7,7 @@ import urllib.parse
 import urllib.request
 from urllib.parse import urlsplit
 
-from .errors import APIError
+from .errors import APIError, SpotifyRateLimitError
 
 LOGGER = logging.getLogger("discogs2spotify.api")
 MAX_AUTOMATIC_RETRY_DELAY = 300
@@ -18,6 +19,8 @@ class HTTPTransport:
         self.retries = retries
         self.sleeper = sleeper
         self.last_request = {}
+        self.request_count = 0
+        self.rate_limit_count = 0
 
     def request(self, service, url, method="GET", headers=None, data=None):
         host = urlsplit(url).netloc
@@ -30,12 +33,15 @@ class HTTPTransport:
             )
             LOGGER.debug("%s %s %s", service, method, urlsplit(url).path or "/")
             try:
+                self.request_count += 1
                 with urllib.request.urlopen(request, timeout=30) as response:
                     self.last_request[host] = time.monotonic()
                     return response.read()
             except urllib.error.HTTPError as error:
                 self.last_request[host] = time.monotonic()
                 endpoint = urlsplit(url).path or "/"
+                if error.code == 429:
+                    self.rate_limit_count += 1
                 try:
                     error_body = error.read(4096).decode("utf-8", errors="replace")
                     parsed_error = json.loads(error_body)
@@ -54,15 +60,75 @@ class HTTPTransport:
                         if isinstance(error_info, dict)
                         else None
                     )
-                    if reason:
-                        detail = "{} ({})".format(
-                            detail or "Spotify API limit", reason
-                        )
                 except (ValueError, AttributeError, KeyError, OSError):
                     detail = None
+                    reason = None
+                retry_after = error.headers.get("Retry-After") if error.headers else None
+                parsed_retry_after = None
+                if retry_after is not None:
+                    try:
+                        value = float(retry_after)
+                        if math.isfinite(value) and value >= 0:
+                            parsed_retry_after = value
+                    except (TypeError, ValueError):
+                        pass
+                if error.code == 429 and service == "Spotify":
+                    spotify_message = str(detail or "")
+                    normalized_reason = str(reason or "").upper()
+                    if normalized_reason == "QUOTA_EXCEEDED":
+                        message = spotify_message or "Spotify quota exhausted"
+                        if parsed_retry_after is not None:
+                            message += "; server requested a retry after {} seconds".format(
+                                int(parsed_retry_after)
+                            )
+                        raise SpotifyRateLimitError(
+                            endpoint,
+                            parsed_retry_after,
+                            message,
+                            normalized_reason,
+                        )
+                    if parsed_retry_after is None:
+                        raise SpotifyRateLimitError(
+                            endpoint,
+                            message=(
+                                "Spotify HTTP 429 without a usable Retry-After value"
+                                + (
+                                    ": {}".format(spotify_message)
+                                    if spotify_message
+                                    else ""
+                                )
+                            ),
+                            reason=normalized_reason or None,
+                        )
+                    if parsed_retry_after > MAX_AUTOMATIC_RETRY_DELAY:
+                        message = spotify_message or "Spotify rate limit"
+                        message += "; server requested a retry after {} seconds".format(
+                            int(parsed_retry_after)
+                        )
+                        raise SpotifyRateLimitError(
+                            endpoint,
+                            parsed_retry_after,
+                            message,
+                            normalized_reason or None,
+                        )
+                    if attempt < self.retries:
+                        LOGGER.info(
+                            "Spotify rate limit reached at %s; retrying after %.1f seconds",
+                            endpoint,
+                            parsed_retry_after,
+                        )
+                        self.sleeper(parsed_retry_after)
+                        continue
+                    raise SpotifyRateLimitError(
+                        endpoint,
+                        parsed_retry_after,
+                        "{}; rate limit persisted after automatic retries".format(
+                            spotify_message or "Spotify rate limit"
+                        ),
+                        normalized_reason or None,
+                    )
                 if error.code == 429 or 500 <= error.code < 600:
                     if attempt < self.retries:
-                        retry_after = error.headers.get("Retry-After")
                         try:
                             delay = float(retry_after)
                         except (TypeError, ValueError):

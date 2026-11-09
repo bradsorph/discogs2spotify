@@ -4,6 +4,8 @@ import logging
 def print_report(report, dry_run, root_name):
     print("Discogs collection: {} releases".format(report.releases_total))
     print("Discogs releases processed: {}".format(report.releases_processed))
+    print("Discogs releases completed: {}".format(report.releases_completed))
+    print("Discogs releases pending: {}".format(report.releases_pending))
     print("Discogs releases skipped: {}".format(report.releases_skipped))
     print("Spotify logical root: {}".format(root_name))
     print()
@@ -49,8 +51,46 @@ def print_report(report, dry_run, root_name):
     print("Tracks ambiguous: {}".format(report.tracks_ambiguous))
     print("Tracks rejected: {}".format(report.tracks_rejected))
     print("Duplicate tracks: {}".format(report.duplicate_tracks))
+    print("Tracks searched: {}".format(report.tracks_searched))
+    print("Tracks resolved from cache: {}".format(report.tracks_resolved_from_cache))
+    print("Spotify API requests: {}".format(report.spotify_api_requests))
+    print("HTTP 429 responses: {}".format(report.http_429_responses))
+    print("Rate-limit pauses: {}".format(report.rate_limit_pauses))
+    print("Quota-exhaustion pauses: {}".format(report.quota_exhaustion_pauses))
+    print("Description updates: {}".format(report.description_updates))
+    print("Artwork updates: {}".format(report.artwork_updates))
+    print("Skipped operations: {}".format(report.skipped_operations))
     print("API errors: {}".format(report.api_errors))
     print("Other errors: {}".format(report.other_errors))
+    if report.sync_paused:
+        print("\nSYNC PAUSED")
+        print("Reason: {}".format(report.pause_reason))
+        if report.current_release_id:
+            print("Current release: Discogs {}".format(report.current_release_id))
+        print(
+            "Completed: {}/{} releases".format(
+                report.releases_completed, report.releases_total
+            )
+        )
+        print("Pending:   {} releases".format(report.releases_pending))
+        if report.retry_after is not None:
+            hours, remainder = divmod(int(report.retry_after), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            print(
+                "Spotify requested a retry after {}h {}m {}s.".format(
+                    hours, minutes, seconds
+                )
+            )
+            if report.retry_at:
+                print("Do not retry before: {}".format(report.retry_at))
+        print("Completed synchronization state has been preserved.")
+    elif report.limit_reached:
+        print("\nRELEASE LIMIT REACHED")
+        print("Completed: {}/{} releases".format(
+            report.releases_completed, report.releases_total
+        ))
+        print("Pending:   {} releases".format(report.releases_pending))
+        print("Run the synchronization again to continue pending releases.")
     for warning in report.warnings:
         print("WARNING: {}".format(warning))
     if dry_run:

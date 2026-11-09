@@ -21,7 +21,7 @@ from discogs2spotify.artwork import IMAGE_LIMIT, UnusableArtwork, make_spotify_j
 from discogs2spotify.config import apply_overrides, filter_releases, load_config
 from discogs2spotify.database import StateStore
 from discogs2spotify.discogs import DiscogsClient, release_from_api
-from discogs2spotify.errors import APIError, SyncError
+from discogs2spotify.errors import APIError, SpotifyRateLimitError, SyncError
 from discogs2spotify.matching import match_track, normalize_text
 from discogs2spotify import main as main_module
 from discogs2spotify.metadata import generate_description, playlist_name, stable_hash
@@ -139,6 +139,7 @@ class FakeSpotify:
         self.playlists = playlists or {}
         self.writes = []
         self.created = 0
+        self.search_calls = []
 
     def list_playlists(self):
         return list(self.playlists.values())
@@ -150,6 +151,7 @@ class FakeSpotify:
         return list(self.playlists[str(playlist_id)].get("_tracks", []))
 
     def search_tracks(self, track):
+        self.search_calls.append(track.title)
         return list(self.search_results.get(track.title, []))
 
     def create_playlist(self, name, description, public=False):
@@ -188,13 +190,14 @@ class ConfigTests(unittest.TestCase):
                 'DISCOGS_USER=bradz667\n'
                 'INCLUDE_FOLDERS=Blues,"Soul - Funk"\n'
                 'EXCLUDE_FOLDERS=For-Sale\n'
-                'DRY_RUN=true\n'
+                'DRY_RUN=false\n'
                 'MATCH_THRESHOLD=92\n',
                 encoding="utf-8",
             )
             config = load_config(path)
         self.assertEqual(config["INCLUDE_FOLDERS"], ["Blues", "Soul - Funk"])
         self.assertEqual(config["STATE_FILE"], str(Path("~/.config/discogs2spotify/state.db").expanduser()))
+        self.assertFalse(config["DRY_RUN"])
         overridden = apply_overrides(
             config, folders=["Rock"], excludes=["For-Sale"], sync=True
         )
@@ -408,7 +411,7 @@ class HTTPTests(unittest.TestCase):
     def test_retries_rate_limit_then_succeeds(self):
         sleeps = []
         responses = [
-            HTTPError("https://api.example/test", 429, "slow down", {"Retry-After": "0"}, None),
+            HTTPError("https://api.example/test", 429, "slow down", {"Retry-After": "10"}, None),
             mock.MagicMock(read=mock.Mock(return_value=b"ok")),
         ]
         responses[1].__enter__.return_value = responses[1]
@@ -417,7 +420,9 @@ class HTTPTests(unittest.TestCase):
             self.assertEqual(
                 transport.request("Spotify", "https://api.example/test"), b"ok"
             )
-        self.assertEqual(sleeps, [0.0])
+        self.assertEqual(sleeps, [10.0])
+        self.assertEqual(transport.request_count, 2)
+        self.assertEqual(transport.rate_limit_count, 1)
 
     def test_long_rate_limit_wait_stops_without_sleeping(self):
         sleeps = []
@@ -434,10 +439,29 @@ class HTTPTests(unittest.TestCase):
         )
         with mock.patch("urllib.request.urlopen", side_effect=error):
             transport = HTTPTransport(delay=0, retries=5, sleeper=sleeps.append)
-            with self.assertRaisesRegex(
-                APIError, "QUOTA_EXCEEDED.*Rerun after the indicated wait"
-            ):
+            with self.assertRaises(SpotifyRateLimitError) as raised:
                 transport.request("Spotify", "https://api.spotify.com/v1/search")
+        self.assertEqual(raised.exception.status, 429)
+        self.assertEqual(raised.exception.endpoint, "/v1/search")
+        self.assertEqual(raised.exception.retry_after, 84519)
+        self.assertEqual(raised.exception.reason, "QUOTA_EXCEEDED")
+        self.assertIn("84519 seconds", str(raised.exception))
+        self.assertEqual(sleeps, [])
+
+    def test_spotify_429_without_retry_after_is_structured_and_not_retried(self):
+        body = __import__("io").BytesIO(
+            b'{"error":{"status":429,"message":"Too many requests"}}'
+        )
+        error = HTTPError(
+            "https://api.spotify.com/v1/search", 429, "Too Many Requests", {}, body
+        )
+        sleeps = []
+        with mock.patch("urllib.request.urlopen", side_effect=error):
+            transport = HTTPTransport(delay=0, retries=5, sleeper=sleeps.append)
+            with self.assertRaises(SpotifyRateLimitError) as raised:
+                transport.request("Spotify", "https://api.spotify.com/v1/search")
+        self.assertIsNone(raised.exception.retry_after)
+        self.assertIn("without a usable Retry-After", str(raised.exception))
         self.assertEqual(sleeps, [])
 
     def test_api_error_includes_safe_spotify_response_message(self):
@@ -488,7 +512,7 @@ class StateAndSyncTests(unittest.TestCase):
     def _state(self, directory, readonly=False):
         return StateStore(Path(directory) / "state.db", readonly=readonly)
 
-    def test_rate_limit_aborts_sync_without_searching_following_tracks(self):
+    def test_rate_limit_pauses_sync_without_searching_following_tracks(self):
         tracks = [
             DiscogsTrack("7", "A1", 0, "First Song", "Artist", "Album", 1970),
             DiscogsTrack("7", "A2", 1, "Second Song", "Artist", "Album", 1970),
@@ -513,14 +537,16 @@ class StateAndSyncTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             state = self._state(directory, readonly=True)
             try:
-                with self.assertRaisesRegex(APIError, "84519 seconds"):
-                    synchronize(
-                        [release], ["7"], spotify, FakeDiscogs(), state,
-                        app_config(), dry_run=True,
-                    )
+                report = synchronize(
+                    [release], ["7"], spotify, FakeDiscogs(), state,
+                    app_config(), dry_run=True,
+                )
             finally:
                 state.close()
         self.assertEqual(spotify.search_calls, 1)
+        self.assertTrue(report.sync_paused)
+        self.assertEqual(report.pause_reason, "Spotify HTTP 429 without a usable Retry-After value")
+        self.assertEqual(report.releases_pending, 1)
 
     def test_duplicate_discogs_tracks_are_preserved_and_reported(self):
         track_one = DiscogsTrack("7", "A1", 0, "Same Song", "Artist", "Album", 1970)
@@ -625,6 +651,70 @@ class StateAndSyncTests(unittest.TestCase):
         main_module._configure_logging(args, "ERROR")
         self.assertEqual(logging.getLogger().level, logging.DEBUG)
 
+    def test_log_formatter_colors_requested_levels(self):
+        formatter = main_module.ColorFormatter(
+            "%(levelname)s: %(message)s", use_color=True
+        )
+        for level, color in (
+            (logging.DEBUG, "\033[1;32m"),
+            (logging.INFO, "\033[1;36m"),
+            (logging.WARNING, "\033[1;33m"),
+            (logging.ERROR, "\033[1;31m"),
+        ):
+            with self.subTest(level=level):
+                record = logging.LogRecord(
+                    "test", level, "", 0, "message", (), None
+                )
+                output = formatter.format(record)
+                self.assertIn("{}{}{}".format(color, record.levelname, "\033[0m"), output)
+                self.assertIn("message", output)
+
+    def test_log_formatter_leaves_redirected_output_uncolored(self):
+        formatter = main_module.ColorFormatter(
+            "%(levelname)s: %(message)s", use_color=False
+        )
+        record = logging.LogRecord(
+            "test", logging.INFO, "", 0, "message", (), None
+        )
+        self.assertEqual(formatter.format(record), "INFO: message")
+
+    def test_max_releases_cli_option_requires_a_positive_integer(self):
+        args = main_module.build_parser().parse_args(["--max-releases", "50"])
+        self.assertEqual(args.max_releases, 50)
+        with self.assertRaises(SystemExit):
+            main_module.build_parser().parse_args(["--max-releases", "0"])
+
+    def test_cli_returns_pause_exit_code_for_quota_exhaustion(self):
+        class QuotaSpotify(FakeSpotify):
+            def search_tracks(self, track):
+                self.search_calls.append(track.title)
+                raise SpotifyRateLimitError(
+                    "/v1/search", 84108, "Daily quota", "QUOTA_EXCEEDED"
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "discogs2spotify.conf"
+            state_path = Path(directory) / "state.db"
+            config_path.write_text(
+                "DISCOGS_USER=bradz667\n"
+                "STATE_FILE={}\n"
+                "DRY_RUN=false\n"
+                "API_DELAY=0\n".format(state_path),
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with mock.patch.object(main_module, "DiscogsClient", return_value=FakeDiscogs()), \
+                    mock.patch.object(main_module, "SpotifyClient", return_value=QuotaSpotify()), \
+                    mock.patch.object(main_module, "read_discogs_token", return_value="fake"), \
+                    redirect_stdout(output):
+                exit_code = main_module.main(["--config", str(config_path)])
+            state = StateStore(state_path, readonly=True)
+            progress = state.sync_progress()
+            state.close()
+        self.assertEqual(exit_code, 3)
+        self.assertIn("SYNC PAUSED", output.getvalue())
+        self.assertEqual(progress["status"], "PAUSED")
+
     def test_real_sync_then_repeat_does_not_repeat_spotify_writes(self):
         release = sample_release()
         spotify = FakeSpotify({"The Waterfront": [candidate()]})
@@ -642,8 +732,13 @@ class StateAndSyncTests(unittest.TestCase):
         self.assertEqual(first.playlists_created, 1)
         self.assertEqual(second.playlists_unchanged, 1)
         self.assertEqual(spotify.writes, writes_after_first)
+        self.assertEqual(spotify.search_calls, ["The Waterfront"])
+        self.assertEqual(second.tracks_resolved_from_cache, 1)
+        self.assertEqual(first.artwork_updates, 1)
+        self.assertEqual(second.artwork_updates, 0)
+        self.assertEqual(second.description_updates, 0)
 
-    def test_missing_tracks_reuse_previous_mapping_without_clearing_playlist(self):
+    def test_successful_track_mapping_is_reused_without_searching_again(self):
         release = sample_release()
         spotify = FakeSpotify({"The Waterfront": [candidate()]})
         discogs = FakeDiscogs()
@@ -660,12 +755,255 @@ class StateAndSyncTests(unittest.TestCase):
                 app_config(), dry_run=False,
             )
             state.close()
-        self.assertEqual(report.tracks_missing, 1)
+        self.assertEqual(report.tracks_matched, 1)
+        self.assertEqual(report.tracks_resolved_from_cache, 1)
+        self.assertEqual(spotify.search_calls, ["The Waterfront"])
         self.assertEqual(spotify.writes, previous_writes)
         self.assertEqual(
             spotify.playlists["created-1"]["_tracks"],
             [{"uri": "spotify:track:spotify-1"}],
         )
+
+    def test_quota_pause_persists_release_progress_and_limited_run_resumes(self):
+        releases = []
+        search_results = {}
+        for release_id in range(1, 5):
+            title = "Song {}".format(release_id)
+            release = sample_release(str(release_id), [
+                DiscogsTrack(
+                    str(release_id), "A1", 0, title,
+                    "John Lee Hooker", "The Real Folk Blues", 1980,
+                )
+            ])
+            releases.append(release)
+            search_results[title] = [
+                candidate(title=title, spotify_id="spotify-{}".format(release_id))
+            ]
+
+        class QuotaSpotify(FakeSpotify):
+            quota_active = True
+
+            def search_tracks(self, track):
+                if self.quota_active and track.title == "Song 3":
+                    self.search_calls.append(track.title)
+                    raise SpotifyRateLimitError(
+                        "/v1/search",
+                        84108,
+                        "Daily quota exhausted",
+                        "QUOTA_EXCEEDED",
+                    )
+                return super().search_tracks(track)
+
+        spotify = QuotaSpotify(search_results)
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(directory)
+            first = synchronize(
+                releases,
+                ["1", "2", "3", "4"],
+                spotify,
+                FakeDiscogs(),
+                state,
+                app_config(),
+                dry_run=False,
+            )
+            progress = state.connection.execute(
+                "SELECT status, current_release_id FROM sync_progress WHERE run_id=1"
+            ).fetchone()
+            self.assertEqual(progress, ("PAUSED", "3"))
+            self.assertEqual(first.releases_completed, 2)
+            self.assertEqual(first.releases_pending, 2)
+            self.assertEqual(first.quota_exhaustion_pauses, 1)
+            pause_output = StringIO()
+            with redirect_stdout(pause_output):
+                print_report(first, False, "My_collection")
+            self.assertIn("Spotify requested a retry after 23h 21m 48s.", pause_output.getvalue())
+            self.assertIn("Reason: Spotify quota exceeded", pause_output.getvalue())
+
+            spotify.quota_active = False
+            state.close()
+            state = self._state(directory)
+            resumed = synchronize(
+                releases,
+                ["1", "2", "3", "4"],
+                spotify,
+                FakeDiscogs(),
+                state,
+                app_config(),
+                dry_run=False,
+                max_releases=2,
+            )
+            state.close()
+
+        self.assertEqual(spotify.search_calls, ["Song 1", "Song 2", "Song 3", "Song 3", "Song 4"])
+        self.assertEqual(resumed.releases_processed, 2)
+        self.assertEqual(resumed.releases_completed, 4)
+        self.assertEqual(resumed.releases_pending, 0)
+        self.assertFalse(resumed.limit_reached)
+
+    def test_max_releases_cursor_advances_between_runs(self):
+        releases = [
+            sample_release(str(release_id), [
+                DiscogsTrack(
+                    str(release_id),
+                    "A1",
+                    0,
+                    "Song {}".format(release_id),
+                    "John Lee Hooker",
+                    "The Real Folk Blues",
+                    1980,
+                )
+            ])
+            for release_id in range(1, 4)
+        ]
+        spotify = FakeSpotify({
+            "Song {}".format(release_id): [
+                candidate(
+                    title="Song {}".format(release_id),
+                    spotify_id="spotify-{}".format(release_id),
+                )
+            ]
+            for release_id in range(1, 4)
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(directory)
+            first = synchronize(
+                releases, ["1", "2", "3"], spotify, FakeDiscogs(), state,
+                app_config(), dry_run=False, max_releases=1,
+            )
+            state.close()
+            state = self._state(directory)
+            second = synchronize(
+                releases, ["1", "2", "3"], spotify, FakeDiscogs(), state,
+                app_config(), dry_run=False, max_releases=1,
+            )
+            progress = state.sync_progress()
+            state.close()
+        self.assertEqual([plan.release.release_id for plan in first.plans], ["1"])
+        self.assertEqual([plan.release.release_id for plan in second.plans], ["2"])
+        self.assertEqual(progress["current_release_id"], "2")
+        self.assertTrue(second.limit_reached)
+
+    def test_successful_search_before_quota_pause_is_saved_independently(self):
+        tracks = [
+            DiscogsTrack("8", "A1", 0, "First Song", "Artist", "Album", 1970),
+            DiscogsTrack("8", "A2", 1, "Second Song", "Artist", "Album", 1970),
+        ]
+        release = sample_release("8", tracks)
+
+        class MidReleaseQuotaSpotify(FakeSpotify):
+            blocked = True
+
+            def search_tracks(self, track):
+                if self.blocked and track.title == "Second Song":
+                    self.search_calls.append(track.title)
+                    raise SpotifyRateLimitError(
+                        "/v1/search", 84108, "Daily limit", "QUOTA_EXCEEDED"
+                    )
+                return super().search_tracks(track)
+
+        spotify = MidReleaseQuotaSpotify({
+            "First Song": [
+                candidate(
+                    "first",
+                    title="First Song",
+                    artist="Artist",
+                    album="Album",
+                    year=1970,
+                )
+            ],
+            "Second Song": [
+                candidate(
+                    "second",
+                    title="Second Song",
+                    artist="Artist",
+                    album="Album",
+                    year=1970,
+                )
+            ],
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(directory)
+            paused = synchronize(
+                [release], ["8"], spotify, FakeDiscogs(), state,
+                app_config(), dry_run=False,
+            )
+            self.assertEqual(state.tracks("8")["A1:0"]["status"], "MATCHED")
+            spotify.blocked = False
+            state.close()
+            state = self._state(directory)
+            resumed = synchronize(
+                [release], ["8"], spotify, FakeDiscogs(), state,
+                app_config(), dry_run=False,
+            )
+            state.close()
+
+        self.assertTrue(paused.sync_paused)
+        self.assertEqual(spotify.search_calls, [
+            "First Song", "Second Song", "Second Song"
+        ])
+        self.assertEqual(resumed.tracks_resolved_from_cache, 1)
+        self.assertEqual(resumed.tracks_searched, 1)
+
+    def test_keyboard_interrupt_is_persisted_for_resume(self):
+        class InterruptingSpotify(FakeSpotify):
+            def search_tracks(self, track):
+                raise KeyboardInterrupt()
+
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(directory)
+            with self.assertRaises(KeyboardInterrupt):
+                synchronize(
+                    [sample_release()], ["3812903"], InterruptingSpotify(),
+                    FakeDiscogs(), state, app_config(), dry_run=False,
+                )
+            self.assertEqual(state.sync_progress()["status"], "INTERRUPTED")
+            state.close()
+
+    def test_legacy_state_schema_is_migrated_without_data_loss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy.db"
+            import sqlite3
+            connection = sqlite3.connect(path)
+            connection.executescript(
+                """
+                CREATE TABLE managed_releases (
+                    discogs_release_id TEXT PRIMARY KEY,
+                    discogs_folder_id TEXT NOT NULL,
+                    discogs_folder_name TEXT NOT NULL,
+                    spotify_playlist_id TEXT NOT NULL UNIQUE,
+                    playlist_name TEXT NOT NULL,
+                    description_hash TEXT,
+                    artwork_hash TEXT,
+                    last_sync TEXT
+                );
+                CREATE TABLE track_mappings (
+                    discogs_release_id TEXT NOT NULL,
+                    track_key TEXT NOT NULL,
+                    track_position TEXT NOT NULL,
+                    track_title TEXT NOT NULL,
+                    track_artist TEXT NOT NULL,
+                    spotify_track_id TEXT,
+                    spotify_track_uri TEXT,
+                    match_method TEXT NOT NULL,
+                    match_score REAL,
+                    status TEXT NOT NULL,
+                    PRIMARY KEY (discogs_release_id, track_key)
+                );
+                INSERT INTO managed_releases VALUES (
+                    '10', '1', 'Blues', 'playlist-10', 'Album', NULL, NULL, NULL
+                );
+                """
+            )
+            connection.commit()
+            connection.close()
+
+            state = StateStore(path)
+            self.assertEqual(state.get_release("10")["playlist_id"], "playlist-10")
+            self.assertFalse(state.get_release("10")["sync_complete"])
+            self.assertTrue(
+                state._column_exists("track_mappings", "cache_signature")
+            )
+            state.close()
 
     def test_orphan_detection_and_deletion_are_safe_by_default(self):
         spotify = FakeSpotify(

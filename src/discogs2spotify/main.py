@@ -1,4 +1,5 @@
 import argparse
+import copy
 import logging
 import os
 import sqlite3
@@ -15,6 +16,38 @@ from .oauth import SpotifyTokenManager
 from .reporting import print_report
 from .spotify import SpotifyClient
 from .sync import synchronize
+
+
+class ColorFormatter(logging.Formatter):
+    COLORS = {
+        logging.DEBUG: "\033[1;32m",
+        logging.INFO: "\033[1;36m",
+        logging.WARNING: "\033[1;33m",
+        logging.ERROR: "\033[1;31m",
+    }
+
+    def __init__(self, *args, use_color=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.use_color = use_color
+
+    def format(self, record):
+        formatted_record = copy.copy(record)
+        color = self.COLORS.get(formatted_record.levelno)
+        if self.use_color and color:
+            formatted_record.levelname = "{}{}{}".format(
+                color, formatted_record.levelname, "\033[0m"
+            )
+        return super().format(formatted_record)
+
+
+def _positive_int(value):
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
 
 
 def build_parser():
@@ -39,6 +72,11 @@ def build_parser():
     parser.add_argument("--exclude", action="append", help="exclude this Discogs folder (repeatable)")
     parser.add_argument("--discogs-user", help="override DISCOGS_USER")
     parser.add_argument("--state-file", help="override SQLite state path")
+    parser.add_argument(
+        "--max-releases",
+        type=_positive_int,
+        help="process at most this many releases, resuming the saved batch cursor",
+    )
     parser.add_argument("--auth", action="store_true", help="start Spotify OAuth and save/refresh the local token")
     parser.add_argument("--verbose", action="store_true", help="show per-release synchronization decisions")
     parser.add_argument(
@@ -57,10 +95,17 @@ def _configure_logging(args, configured_level="INFO"):
         level_name = "DEBUG"
     elif args.verbose and level_name in ("WARNING", "ERROR"):
         level_name = "INFO"
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        ColorFormatter(
+            "%(asctime)s %(levelname)s: %(message)s",
+            datefmt="%H:%M:%S",
+            use_color=sys.stderr.isatty(),
+        )
+    )
     logging.basicConfig(
         level=getattr(logging, level_name),
-        format="%(asctime)s %(levelname)s: %(message)s",
-        datefmt="%H:%M:%S",
+        handlers=[handler],
         force=True,
     )
     logging.getLogger("PIL").setLevel(logging.WARNING)
@@ -186,6 +231,7 @@ def main(argv=None):
                 config,
                 dry_run=dry_run,
                 verbose=args.verbose or args.debug,
+                max_releases=args.max_releases,
             )
         finally:
             state.close()
@@ -210,6 +256,8 @@ def main(argv=None):
         )
         print_report(report, dry_run, config["SPOTIFY_PLAYLIST_ROOT"])
         logger.info("Synchronization finished")
+        if report.sync_paused:
+            return 3
         return 1 if report.api_errors or report.other_errors else 0
     except (SyncError, APIError, sqlite3.Error, OSError) as error:
         print("Error: {}".format(error), file=sys.stderr)

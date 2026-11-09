@@ -89,7 +89,7 @@ def _as_bool(value, key):
     if text in ("true", "1", "yes", "on"):
         return True
     if text in ("false", "0", "no", "off", ""):
-        return text != ""
+        return False
     raise SyncError("{} must be true or false".format(key))
 
 
