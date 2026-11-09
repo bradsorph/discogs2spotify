@@ -41,18 +41,43 @@ def build_parser():
     parser.add_argument("--state-file", help="override SQLite state path")
     parser.add_argument("--auth", action="store_true", help="start Spotify OAuth and save/refresh the local token")
     parser.add_argument("--verbose", action="store_true", help="show per-release synchronization decisions")
-    parser.add_argument("--debug", action="store_true", help="enable diagnostic logging (credentials are never logged)")
+    parser.add_argument(
+        "--log-level",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        type=str.upper,
+        help="set logging verbosity (overrides LOG_LEVEL in config)",
+    )
+    parser.add_argument("--debug", action="store_true", help="shorthand for --log-level DEBUG")
     return parser
 
 
-def _configure_logging(args):
-    level = logging.DEBUG if args.debug else logging.INFO if args.verbose else logging.WARNING
-    logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
+def _configure_logging(args, configured_level="INFO"):
+    level_name = args.log_level or configured_level
+    if args.debug:
+        level_name = "DEBUG"
+    elif args.verbose and level_name in ("WARNING", "ERROR"):
+        level_name = "INFO"
+    logging.basicConfig(
+        level=getattr(logging, level_name),
+        format="%(asctime)s %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+        force=True,
+    )
+    logging.getLogger("PIL").setLevel(logging.WARNING)
 
 
 def _load_releases(discogs, collection, report):
     releases = []
-    for record in collection:
+    total = len(collection)
+    logger = logging.getLogger("discogs2spotify")
+    logger.info("Loading full Discogs release metadata for %d selected releases", total)
+    for index, record in enumerate(collection, 1):
+        if index == 1 or index % 10 == 0 or index == total:
+            logger.info("Loading release metadata: %d/%d", index, total)
+        logger.debug(
+            "Fetching Discogs release metadata: release %s (%d/%d)",
+            record["release_id"], index, total,
+        )
         try:
             details = discogs.get_release(record["release_id"])
             releases.append(release_from_api(record, details))
@@ -63,15 +88,20 @@ def _load_releases(discogs, collection, report):
                 "API error for Discogs release {}: {}".format(record["release_id"], error)
             )
             logging.getLogger("discogs2spotify").error("%s", error)
+    logger.info(
+        "Finished release metadata: %d loaded, %d failed",
+        len(releases), report.api_errors,
+    )
     return releases
 
 
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
-    _configure_logging(args)
     try:
         config = load_config(args.config)
+        _configure_logging(args, config["LOG_LEVEL"])
+        logger = logging.getLogger("discogs2spotify")
         config = apply_overrides(
             config,
             discogs_user=args.discogs_user,
@@ -86,6 +116,7 @@ def main(argv=None):
             public_playlists=config["SPOTIFY_PUBLIC_PLAYLISTS"],
         )
         if args.auth:
+            logger.info("Starting Spotify authorization")
             token_manager.access_token(force_auth=True)
             print("Spotify authorization saved under ~/.config/discogs2spotify/")
             return 0
@@ -97,11 +128,19 @@ def main(argv=None):
             os.environ.get("DISCOGS_TOKEN_FILE", "~/.config/discogs/token")
         )
         discogs_transport = HTTPTransport(delay=config["API_DELAY"])
-        spotify_transport = HTTPTransport(delay=0.1)
+        spotify_transport = HTTPTransport(
+            delay=max(config["SPOTIFY_API_DELAY"], 1.05)
+        )
         discogs = DiscogsClient(discogs_token, transport=discogs_transport)
         spotify = SpotifyClient(token_manager, transport=spotify_transport)
 
+        logger.info("Reading Discogs folders and collection for %s", username)
         collection, duplicates, folders = discogs.list_collection(username)
+        logger.info(
+            "Discogs collection loaded: %d unique releases across %d folders",
+            len(collection),
+            len([folder for folder in folders if str(folder.get("id")) != "0"]),
+        )
         if config["INCLUDE_FOLDERS"]:
             available_folders = {
                 str(folder.get("name") or "")
@@ -121,10 +160,21 @@ def main(argv=None):
         selected = filter_releases(
             collection, config["INCLUDE_FOLDERS"], config["EXCLUDE_FOLDERS"]
         )
+        logger.info(
+            "Selected %d of %d releases; filters include=%s exclude=%s",
+            len(selected),
+            len(collection),
+            config["INCLUDE_FOLDERS"] or "(all)",
+            config["EXCLUDE_FOLDERS"] or "(none)",
+        )
         report_errors = SyncReport()
         releases = _load_releases(discogs, selected, report_errors)
 
         dry_run = bool(config["DRY_RUN"] or args.report)
+        logger.info(
+            "Starting %s synchronization planning; Spotify playlist inventory follows",
+            "read-only dry-run" if dry_run else "write-enabled",
+        )
         state = StateStore(config["STATE_FILE"], readonly=dry_run)
         try:
             report = synchronize(
@@ -159,6 +209,7 @@ def main(argv=None):
             )
         )
         print_report(report, dry_run, config["SPOTIFY_PLAYLIST_ROOT"])
+        logger.info("Synchronization finished")
         return 1 if report.api_errors or report.other_errors else 0
     except (SyncError, APIError, sqlite3.Error, OSError) as error:
         print("Error: {}".format(error), file=sys.stderr)

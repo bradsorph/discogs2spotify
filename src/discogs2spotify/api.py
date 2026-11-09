@@ -1,4 +1,5 @@
 import time
+import json
 import logging
 import urllib.error
 import urllib.parse
@@ -8,6 +9,7 @@ from urllib.parse import urlsplit
 from .errors import APIError
 
 LOGGER = logging.getLogger("discogs2spotify.api")
+MAX_AUTOMATIC_RETRY_DELAY = 300
 
 
 class HTTPTransport:
@@ -26,6 +28,7 @@ class HTTPTransport:
             request = urllib.request.Request(
                 url, data=data, headers=headers or {}, method=method
             )
+            LOGGER.debug("%s %s %s", service, method, urlsplit(url).path or "/")
             try:
                 with urllib.request.urlopen(request, timeout=30) as response:
                     self.last_request[host] = time.monotonic()
@@ -33,6 +36,30 @@ class HTTPTransport:
             except urllib.error.HTTPError as error:
                 self.last_request[host] = time.monotonic()
                 endpoint = urlsplit(url).path or "/"
+                try:
+                    error_body = error.read(4096).decode("utf-8", errors="replace")
+                    parsed_error = json.loads(error_body)
+                    error_info = (
+                        parsed_error.get("error")
+                        if isinstance(parsed_error, dict)
+                        else None
+                    )
+                    detail = (
+                        error_info.get("message")
+                        if isinstance(error_info, dict)
+                        else None
+                    )
+                    reason = (
+                        error_info.get("reason")
+                        if isinstance(error_info, dict)
+                        else None
+                    )
+                    if reason:
+                        detail = "{} ({})".format(
+                            detail or "Spotify API limit", reason
+                        )
+                except (ValueError, AttributeError, KeyError, OSError):
+                    detail = None
                 if error.code == 429 or 500 <= error.code < 600:
                     if attempt < self.retries:
                         retry_after = error.headers.get("Retry-After")
@@ -40,6 +67,19 @@ class HTTPTransport:
                             delay = float(retry_after)
                         except (TypeError, ValueError):
                             delay = min(2 ** attempt, 30)
+                        if delay > MAX_AUTOMATIC_RETRY_DELAY:
+                            raise APIError(
+                                service,
+                                error.code,
+                                endpoint,
+                                "{}server requested a retry after {} seconds; "
+                                "stopping instead of waiting more than {} seconds. "
+                                "Rerun after the indicated wait".format(
+                                    (detail + "; ") if detail else "",
+                                    int(delay),
+                                    MAX_AUTOMATIC_RETRY_DELAY,
+                                ),
+                            )
                         LOGGER.debug(
                             "%s %s returned HTTP %s; retry %d/%d in %.1fs",
                             service, endpoint, error.code, attempt + 1, self.retries, delay,
@@ -51,7 +91,9 @@ class HTTPTransport:
                     message = "rate limited after {} retries".format(attempt)
                 elif 500 <= error.code < 600:
                     message = "server error after {} retries".format(attempt)
-                if error.code in (400, 401, 403, 404, 409, 422):
+                elif detail:
+                    message = detail[:240]
+                elif error.code in (400, 401, 403, 404, 409, 422):
                     message = "request was rejected"
                 raise APIError(service, error.code, endpoint, message)
             except (urllib.error.URLError, TimeoutError) as error:

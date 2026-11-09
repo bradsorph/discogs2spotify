@@ -74,8 +74,9 @@ Without an include list, every folder except excluded folders is selected.
 
 ## Configuration
 
-The default file is `discogs2spotify.conf` (KEY=value). YAML files are also
-accepted when supplied with `--config path.yaml`. Important settings include:
+The default file is `discogs2spotify.conf`. It accepts either KEY=value
+settings or YAML; YAML is also accepted from files ending in `.yaml` or `.yml`
+when supplied with `--config path.yaml`. Important settings include:
 
 ```text
 DISCOGS_USER=bradz667
@@ -89,7 +90,25 @@ AMBIGUOUS_MATCH_ACTION=skip
 MISSING_TRACK_ACTION=report
 DUPLICATE_TRACK_ACTION=skip
 STATE_FILE=~/.config/discogs2spotify/state.db
+LOG_LEVEL=INFO
+SPOTIFY_API_DELAY=2.0
 ```
+
+Spotify's published rate limit uses a rolling 30-second window, but its exact
+request limit varies by app and quota mode and is not published as a fixed
+number. The client spaces Spotify requests at least 2 seconds apart by
+default; `SPOTIFY_API_DELAY` can increase that interval. Values below 1.05
+seconds still use a 1.05-second minimum. This pacing reduces bursts but cannot
+prevent a rate limit caused by other app activity or development-mode quota
+buckets. On HTTP 429 the client honors `Retry-After` for short waits and stops
+instead of blocking for more than five minutes. Check the Spotify Developer
+Dashboard's request graph and app quota mode if long 429 windows continue.
+
+`LOG_LEVEL` accepts `DEBUG`, `INFO`, `WARNING`, or `ERROR`. The default `INFO`
+shows startup phases and periodic release counts so a longer run visibly
+progresses. Set `LOG_LEVEL=DEBUG` in the config, pass `--log-level DEBUG`, or
+use `--debug` for per-request and per-track diagnostics. Command-line logging
+options override the config; `--verbose` also enables per-release details.
 
 Description settings can enable/disable playlist descriptions, catalog number,
 format, genre, style, notes, matrix, and Discogs URL. Available Discogs data is
@@ -122,7 +141,10 @@ existing playlist cover is left untouched.
   explicit `--sync` is used, tracks are cleared from listed orphaned managed
   playlists; the playlist itself is retained. No unmanaged playlist is changed.
 - Discogs pagination, API 429/5xx/network retries and resumable SQLite writes
-  are handled. API errors cause a non-zero exit; missing tracks are warnings.
+  are handled. Spotify requests are paced using `SPOTIFY_API_DELAY`;
+  exceptionally long rate-limit waits stop with an actionable error instead
+  of blocking for hours. API errors cause a non-zero exit; missing tracks are
+  warnings.
 
 Output includes playlist create/update/exist decisions, cover and description
 statuses, match counts, missing-track details, duplicate/orphan reports, and

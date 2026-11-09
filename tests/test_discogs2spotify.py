@@ -1,10 +1,11 @@
 import base64
 import json
+import logging
 import os
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest import mock
@@ -27,6 +28,7 @@ from discogs2spotify.metadata import generate_description, playlist_name, stable
 from discogs2spotify.models import DiscogsRelease, DiscogsTrack, TrackCandidate
 from discogs2spotify.oauth import BASE_SCOPES, SpotifyTokenManager
 from discogs2spotify.reporting import print_report
+from discogs2spotify.spotify import SpotifyClient
 from discogs2spotify.sync import synchronize
 
 
@@ -200,6 +202,22 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(overridden["DRY_RUN"])
         self.assertEqual(config["MATCH_THRESHOLD"], 92)
 
+    def test_log_level_has_info_default_and_rejects_unknown_values(self):
+        self.assertEqual(app_config()["LOG_LEVEL"], "INFO")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "discogs2spotify.conf"
+            path.write_text("LOG_LEVEL=TRACE\n", encoding="utf-8")
+            with self.assertRaisesRegex(SyncError, "LOG_LEVEL"):
+                load_config(path)
+
+    def test_spotify_request_delay_is_configurable_and_conservative_by_default(self):
+        self.assertEqual(app_config()["SPOTIFY_API_DELAY"], 2.0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "discogs2spotify.conf"
+            path.write_text("SPOTIFY_API_DELAY=3.5\n", encoding="utf-8")
+            config = load_config(path)
+        self.assertEqual(config["SPOTIFY_API_DELAY"], 3.5)
+
     def test_yaml_config_is_still_supported(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "custom.yaml"
@@ -213,6 +231,20 @@ class ConfigTests(unittest.TestCase):
             config = load_config(path)
         self.assertEqual(config["INCLUDE_FOLDERS"], ["Soul - Funk"])
         self.assertFalse(config["DRY_RUN"])
+
+    def test_yaml_config_is_detected_in_default_conf_filename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "discogs2spotify.conf"
+            path.write_text(
+                "DISCOGS_USER: bradz667\n"
+                "SPOTIFY_PLAYLIST_ROOT: Bradz667_Vinyls\n"
+                "INCLUDE_FOLDERS: []\n",
+                encoding="utf-8",
+            )
+            config = load_config(path)
+        self.assertEqual(config["DISCOGS_USER"], "bradz667")
+        self.assertEqual(config["SPOTIFY_PLAYLIST_ROOT"], "Bradz667_Vinyls")
+        self.assertEqual(config["INCLUDE_FOLDERS"], [])
 
     def test_folder_filter_include_and_exclude(self):
         releases = [
@@ -387,10 +419,108 @@ class HTTPTests(unittest.TestCase):
             )
         self.assertEqual(sleeps, [0.0])
 
+    def test_long_rate_limit_wait_stops_without_sleeping(self):
+        sleeps = []
+        body = __import__("io").BytesIO(
+            b'{"error":{"status":429,"message":"Too many requests",'
+            b'"reason":"QUOTA_EXCEEDED"}}'
+        )
+        error = HTTPError(
+            "https://api.spotify.com/v1/search",
+            429,
+            "Too Many Requests",
+            {"Retry-After": "84519"},
+            body,
+        )
+        with mock.patch("urllib.request.urlopen", side_effect=error):
+            transport = HTTPTransport(delay=0, retries=5, sleeper=sleeps.append)
+            with self.assertRaisesRegex(
+                APIError, "QUOTA_EXCEEDED.*Rerun after the indicated wait"
+            ):
+                transport.request("Spotify", "https://api.spotify.com/v1/search")
+        self.assertEqual(sleeps, [])
+
+    def test_api_error_includes_safe_spotify_response_message(self):
+        body = __import__("io").BytesIO(
+            b'{"error":{"status":400,"message":"Invalid search query"}}'
+        )
+        error = HTTPError(
+            "https://api.spotify.com/v1/search",
+            400,
+            "Bad Request",
+            {},
+            body,
+        )
+        with mock.patch("urllib.request.urlopen", side_effect=error):
+            transport = HTTPTransport(delay=0, retries=0)
+            with self.assertRaisesRegex(APIError, "Invalid search query"):
+                transport.request(
+                    "Spotify",
+                    "https://api.spotify.com/v1/search?q=test",
+                )
+
+
+class SpotifySearchTests(unittest.TestCase):
+    def test_search_uses_plain_terms_and_encodes_query_parameters(self):
+        class FakeTransport:
+            url = None
+
+            def request(self, service, url, method="GET", headers=None, data=None):
+                self.url = url
+                return b'{"tracks":{"items":[]}}'
+
+        class FakeTokenManager:
+            def access_token(self):
+                return "fake"
+
+        transport = FakeTransport()
+        client = SpotifyClient(FakeTokenManager(), transport=transport)
+        client.search_tracks(sample_release().tracks[0])
+        parsed = urlparse(transport.url)
+        query = parse_qs(parsed.query)
+        self.assertEqual(query["q"], ["The Waterfront John Lee Hooker"])
+        self.assertNotIn('"', query["q"][0])
+        self.assertEqual(query["type"], ["track"])
+        self.assertEqual(query["limit"], ["10"])
+
 
 class StateAndSyncTests(unittest.TestCase):
     def _state(self, directory, readonly=False):
         return StateStore(Path(directory) / "state.db", readonly=readonly)
+
+    def test_rate_limit_aborts_sync_without_searching_following_tracks(self):
+        tracks = [
+            DiscogsTrack("7", "A1", 0, "First Song", "Artist", "Album", 1970),
+            DiscogsTrack("7", "A2", 1, "Second Song", "Artist", "Album", 1970),
+        ]
+        release = sample_release("7", tracks)
+
+        class RateLimitedSpotify(FakeSpotify):
+            def __init__(self):
+                super().__init__()
+                self.search_calls = 0
+
+            def search_tracks(self, track):
+                self.search_calls += 1
+                raise APIError(
+                    "Spotify",
+                    429,
+                    "/v1/search",
+                    "server requested a retry after 84519 seconds",
+                )
+
+        spotify = RateLimitedSpotify()
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(directory, readonly=True)
+            try:
+                with self.assertRaisesRegex(APIError, "84519 seconds"):
+                    synchronize(
+                        [release], ["7"], spotify, FakeDiscogs(), state,
+                        app_config(), dry_run=True,
+                    )
+            finally:
+                state.close()
+        self.assertEqual(spotify.search_calls, 1)
 
     def test_duplicate_discogs_tracks_are_preserved_and_reported(self):
         track_one = DiscogsTrack("7", "A1", 0, "Same Song", "Artist", "Album", 1970)
@@ -461,6 +591,39 @@ class StateAndSyncTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(spotify.writes, [])
         self.assertIn("NO CHANGES MADE", output.getvalue())
+
+    def test_cli_default_info_logs_visible_progress(self):
+        spotify = FakeSpotify({"The Waterfront": [candidate()]})
+        discogs = FakeDiscogs()
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "discogs2spotify.conf"
+            config_path.write_text(
+                "DISCOGS_USER=bradz667\n"
+                "STATE_FILE={}\n"
+                "DRY_RUN=true\n"
+                "API_DELAY=0\n".format(Path(directory) / "state.db"),
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with mock.patch.object(main_module, "DiscogsClient", return_value=discogs), \
+                    mock.patch.object(main_module, "SpotifyClient", return_value=spotify), \
+                    mock.patch.object(main_module, "read_discogs_token", return_value="fake"), \
+                    redirect_stderr(output):
+                try:
+                    exit_code = main_module.main(["--config", str(config_path)])
+                finally:
+                    for handler in logging.getLogger().handlers[:]:
+                        handler.flush()
+                        logging.getLogger().removeHandler(handler)
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Reading Discogs folders and collection", output.getvalue())
+        self.assertIn("Loading release metadata: 1/1", output.getvalue())
+        self.assertIn("Synchronization finished", output.getvalue())
+
+    def test_cli_log_level_overrides_config(self):
+        args = main_module.build_parser().parse_args(["--log-level", "DEBUG"])
+        main_module._configure_logging(args, "ERROR")
+        self.assertEqual(logging.getLogger().level, logging.DEBUG)
 
     def test_real_sync_then_repeat_does_not_repeat_spotify_writes(self):
         release = sample_release()

@@ -26,6 +26,16 @@ def _resolve_tracks(release, spotify, previous, settings):
             threshold=settings["MATCH_THRESHOLD"],
             ambiguous_action=settings["AMBIGUOUS_MATCH_ACTION"],
         )
+        LOGGER.debug(
+            "Track match release=%s position=%s title=%r candidates=%d result=%s score=%.1f reason=%s",
+            track.release_id,
+            track.position,
+            track.title,
+            len(candidates),
+            match.status,
+            match.score,
+            match.reason,
+        )
         if match.status == "MATCHED" and match.uri:
             signature = _source_signature(track)
             if match.uri in source_by_uri:
@@ -284,8 +294,13 @@ def synchronize(
     verbose=False,
 ):
     report = SyncReport(releases_total=len(all_release_ids))
+    LOGGER.info("Checking existing Spotify playlists and managed release markers")
     managed_playlists, unmanaged_names = discover_managed_playlists(
         spotify, state, verbose
+    )
+    LOGGER.info(
+        "Spotify inventory complete: %d managed release mappings",
+        len(managed_playlists),
     )
     report.releases_skipped = max(0, len(all_release_ids) - len(releases))
     existing = {str(release_id) for release_id in all_release_ids}
@@ -307,7 +322,17 @@ def synchronize(
                 )
             )
 
-    for release in releases:
+    total = len(releases)
+    LOGGER.info("Planning %d selected releases", total)
+    for index, release in enumerate(releases, 1):
+        if index == 1 or index % 10 == 0 or index == total:
+            LOGGER.info(
+                "Planning release %d/%d: Discogs %s (%s)",
+                index,
+                total,
+                release.release_id,
+                release.title or "untitled",
+            )
         try:
             plan = build_release_plan(
                 release, spotify, discogs, state, config,
@@ -368,7 +393,17 @@ def synchronize(
                     plan.cover_status,
                     plan.description_status,
                 )
+            else:
+                LOGGER.debug(
+                    "%s release=%s playlist=%s tracks=%d",
+                    plan.playlist_action,
+                    release.release_id,
+                    plan.playlist_name,
+                    len(release.tracks),
+                )
         except APIError as error:
+            if error.status == 429:
+                raise
             report.api_errors += 1
             report.releases_skipped += 1
             report.warnings.append(

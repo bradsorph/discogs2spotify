@@ -1,6 +1,5 @@
 import base64
 import json
-import re
 import urllib.parse
 
 from .api import HTTPTransport, json_request
@@ -95,13 +94,12 @@ class SpotifyClient:
             offset += len(items)
         return tracks
 
-    def search_tracks(self, track, limit=50):
-        def term(value):
-            return re.sub(r'(["\\])', r"\\\1", value or "")
-
-        query = 'track:"{}"'.format(term(track.title))
-        if track.artist:
-            query += ' artist:"{}"'.format(term(track.artist))
+    def search_tracks(self, track, limit=10):
+        # Spotify's search grammar rejects some punctuation/quoted field filters
+        # as HTTP 400. Send plain terms and do precise ranking locally.
+        query = " ".join(
+            value.strip() for value in (track.title, track.artist) if value.strip()
+        )
         endpoint = "/search?" + urllib.parse.urlencode(
             {"q": query, "type": "track", "limit": limit}
         )

@@ -1,4 +1,5 @@
 import json
+import logging
 import urllib.parse
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from .models import DiscogsRelease, DiscogsTrack
 
 
 BASE_URL = "https://api.discogs.com"
+LOGGER = logging.getLogger("discogs2spotify")
 
 
 def read_discogs_token(path=None):
@@ -52,6 +54,7 @@ class DiscogsClient:
             yield from data.get("releases", data.get("folders", []))
             pagination = data.get("pagination") or {}
             pages = int(pagination.get("pages") or 1)
+            LOGGER.debug("Discogs pagination: received page %d of %d", page, pages)
             if page >= pages:
                 break
             page += 1

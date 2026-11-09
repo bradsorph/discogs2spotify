@@ -31,7 +31,9 @@ DEFAULTS = {
     "DESCRIPTION_INCLUDE_DISCOGS_URL": True,
     "ARTWORK_IMAGE_INDEX": "primary",
     "API_DELAY": 1.05,
+    "SPOTIFY_API_DELAY": 2.0,
     "OAUTH_REDIRECT_URI": "http://127.0.0.1:8888/callback",
+    "LOG_LEVEL": "INFO",
 }
 
 
@@ -64,6 +66,22 @@ def _parse_conf(text):
     return config
 
 
+def _is_yaml_config(path, text):
+    if path.suffix.lower() in (".yaml", ".yml"):
+        return True
+    first_content_line = next(
+        (
+            line.strip()
+            for line in text.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ),
+        "",
+    )
+    return bool(first_content_line.startswith("{") or (
+        ":" in first_content_line and "=" not in first_content_line
+    ))
+
+
 def _as_bool(value, key):
     if isinstance(value, bool):
         return value
@@ -93,7 +111,7 @@ def load_config(path):
     except OSError as error:
         raise SyncError("Cannot read configuration file {}: {}".format(path, error))
 
-    if path.suffix.lower() in (".yaml", ".yml"):
+    if _is_yaml_config(path, text):
         try:
             parsed = yaml.safe_load(text)
         except yaml.YAMLError as error:
@@ -125,6 +143,9 @@ def load_config(path):
     try:
         config["MATCH_THRESHOLD"] = float(config["MATCH_THRESHOLD"])
         config["API_DELAY"] = max(0.0, float(config["API_DELAY"]))
+        config["SPOTIFY_API_DELAY"] = max(
+            0.0, float(config["SPOTIFY_API_DELAY"])
+        )
     except (TypeError, ValueError):
         raise SyncError("MATCH_THRESHOLD and API_DELAY must be numbers")
     if not 0 <= config["MATCH_THRESHOLD"] <= 100:
@@ -136,6 +157,9 @@ def load_config(path):
     if config["DUPLICATE_TRACK_ACTION"] not in ("skip", "allow"):
         raise SyncError("DUPLICATE_TRACK_ACTION must be 'skip' or 'allow'")
     config["STATE_FILE"] = str(Path(str(config["STATE_FILE"])).expanduser())
+    config["LOG_LEVEL"] = str(config["LOG_LEVEL"]).strip().upper()
+    if config["LOG_LEVEL"] not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+        raise SyncError("LOG_LEVEL must be DEBUG, INFO, WARNING, or ERROR")
     return config
 
 
