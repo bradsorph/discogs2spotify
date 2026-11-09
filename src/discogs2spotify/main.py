@@ -13,6 +13,7 @@ from .discogs import DiscogsClient, read_discogs_token, release_from_api
 from .errors import APIError, SyncError
 from .models import SyncReport
 from .oauth import SpotifyTokenManager
+from .process_lock import SyncProcessLock
 from .reporting import print_report
 from .spotify import SpotifyClient
 from .sync import synchronize
@@ -75,7 +76,7 @@ def build_parser():
     parser.add_argument(
         "--max-releases",
         type=_positive_int,
-        help="process at most this many releases, resuming the saved batch cursor",
+        help="process at most this many pending releases",
     )
     parser.add_argument("--auth", action="store_true", help="start Spotify OAuth and save/refresh the local token")
     parser.add_argument("--verbose", action="store_true", help="show per-release synchronization decisions")
@@ -143,6 +144,7 @@ def _load_releases(discogs, collection, report):
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    process_lock = None
     try:
         config = load_config(args.config)
         _configure_logging(args, config["LOG_LEVEL"])
@@ -166,6 +168,8 @@ def main(argv=None):
             print("Spotify authorization saved under ~/.config/discogs2spotify/")
             return 0
 
+        process_lock = SyncProcessLock(config["STATE_FILE"])
+        process_lock.acquire()
         username = str(config["DISCOGS_USER"]).strip()
         if not username:
             raise SyncError("Set DISCOGS_USER in discogs2spotify.conf or use --discogs-user")
@@ -266,6 +270,9 @@ def main(argv=None):
     except KeyboardInterrupt:
         print("Interrupted; rerun to resume safely.", file=sys.stderr)
         return 130
+    finally:
+        if process_lock is not None:
+            process_lock.release()
 
 
 if __name__ == "__main__":

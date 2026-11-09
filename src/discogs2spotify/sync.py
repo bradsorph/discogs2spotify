@@ -438,7 +438,6 @@ def synchronize(
     transport = getattr(spotify, "transport", None)
     starting_requests = getattr(transport, "request_count", 0)
     starting_429s = getattr(transport, "rate_limit_count", 0)
-    previous_progress = state.sync_progress()
     report.releases_skipped = max(0, len(all_release_ids) - len(releases))
     signatures = {
         release.release_id: _release_sync_signature(release, config)
@@ -453,6 +452,9 @@ def synchronize(
     }
     report.releases_completed = len(completed_ids)
     report.releases_pending = max(0, len(releases) - len(completed_ids))
+    pending_releases = [
+        release for release in releases if release.release_id not in completed_ids
+    ]
     if not dry_run and not state.readonly:
         state.update_sync_progress(
             "RUNNING",
@@ -470,8 +472,8 @@ def synchronize(
             state.update_sync_progress(
                 "INTERRUPTED",
                 reason="User interrupted synchronization",
-                completed_releases=report.releases_completed,
-                pending_releases=report.releases_pending,
+                completed_releases=len(completed_ids),
+                pending_releases=max(0, len(releases) - len(completed_ids)),
             )
         raise
     except APIError as error:
@@ -510,25 +512,14 @@ def synchronize(
                 )
             )
 
-    if max_releases is not None:
-        start_index = 0
-        if previous_progress:
-            previous_id = previous_progress.get("current_release_id")
-            previous_ids = [release.release_id for release in releases]
-            if previous_id in previous_ids:
-                previous_index = previous_ids.index(previous_id)
-                if previous_progress.get("status") == "LIMIT_REACHED":
-                    start_index = (previous_index + 1) % len(releases)
-                elif previous_progress.get("status") in (
-                    "PAUSED", "RUNNING", "INTERRUPTED"
-                ):
-                    start_index = previous_index
-        ordered = releases[start_index:] + releases[:start_index]
-        releases_to_process = ordered[:max_releases]
-        report.releases_skipped += len(releases) - len(releases_to_process)
-        report.skipped_operations += len(releases) - len(releases_to_process)
-    else:
-        releases_to_process = list(releases)
+    releases_to_process = (
+        pending_releases[:max_releases]
+        if max_releases is not None
+        else pending_releases
+    )
+    skipped_by_schedule = len(releases) - len(releases_to_process)
+    report.releases_skipped += skipped_by_schedule
+    report.skipped_operations += skipped_by_schedule
 
     total = len(releases_to_process)
     LOGGER.info("Planning %d selected releases", total)
@@ -584,25 +575,22 @@ def synchronize(
                             )
                         )
                         continue
-                    previously_complete = release.release_id in completed_ids
-                    completed_ids.discard(release.release_id)
-                    try:
-                        _apply_plan(
-                            plan,
-                            spotify,
-                            state,
-                            config,
-                            dry_run,
-                            signatures[release.release_id],
-                            report,
-                        )
-                    except (APIError, SyncError, KeyError, ValueError):
-                        if previously_complete and state.is_release_complete(
-                            release.release_id, signatures[release.release_id]
-                        ):
-                            completed_ids.add(release.release_id)
-                        raise
+                    _apply_plan(
+                        plan,
+                        spotify,
+                        state,
+                        config,
+                        dry_run,
+                        signatures[release.release_id],
+                        report,
+                    )
                     completed_ids.add(release.release_id)
+                    if not dry_run and not state.readonly:
+                        state.update_sync_progress(
+                            "RUNNING",
+                            completed_releases=len(completed_ids),
+                            pending_releases=max(0, len(releases) - len(completed_ids)),
+                        )
                     report.releases_processed += 1
                     if plan.playlist_action == "CREATE":
                         report.playlists_created += 1
@@ -661,6 +649,14 @@ def synchronize(
                         break
                     report.api_errors += 1
                     report.releases_skipped += 1
+                    if not dry_run and not state.readonly:
+                        state.update_sync_progress(
+                            "INCOMPLETE",
+                            reason=str(error),
+                            current_release_id=release.release_id,
+                            completed_releases=len(completed_ids),
+                            pending_releases=max(0, len(releases) - len(completed_ids)),
+                        )
                     report.warnings.append(
                         "API error for Discogs release {}: {}".format(
                             release.release_id, error
@@ -670,6 +666,14 @@ def synchronize(
                 except (SyncError, KeyError, ValueError) as error:
                     report.other_errors += 1
                     report.releases_skipped += 1
+                    if not dry_run and not state.readonly:
+                        state.update_sync_progress(
+                            "INCOMPLETE",
+                            reason=str(error),
+                            current_release_id=release.release_id,
+                            completed_releases=len(completed_ids),
+                            pending_releases=max(0, len(releases) - len(completed_ids)),
+                        )
                     report.warnings.append(
                         "Error for Discogs release {}: {}".format(
                             release.release_id, error
@@ -748,9 +752,6 @@ def synchronize(
         state.update_sync_progress(
             status,
             reason="--max-releases limit reached" if report.limit_reached else None,
-            current_release_id=(
-                releases_to_process[-1].release_id if report.limit_reached else None
-            ),
             completed_releases=report.releases_completed,
             pending_releases=report.releases_pending,
         )

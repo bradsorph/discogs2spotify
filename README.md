@@ -75,6 +75,12 @@ releases, then rerun to continue:
 ./discogs2spotify.sh --sync --max-releases 50
 ```
 
+Only releases whose source data changed or whose previous synchronization did
+not complete are pending. The batch limit applies after this check, so a failed
+release is retried and completed releases do not use up the batch. A local
+operating-system lock prevents overlapping synchronization processes; it is
+released automatically if the process exits or is terminated.
+
 Spotify can return HTTP 429 responses. Short rate limits are automatically
 retried using Spotify's `Retry-After` value. The synchronizer does not block
 for longer server-requested waits; it pauses, persists progress in SQLite, and

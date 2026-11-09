@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -32,6 +33,7 @@ from discogs2spotify.models import (
     TrackCandidate,
 )
 from discogs2spotify.oauth import BASE_SCOPES, SpotifyTokenManager
+from discogs2spotify.process_lock import SyncProcessLock
 from discogs2spotify.reporting import print_report
 from discogs2spotify.spotify import SpotifyClient
 from discogs2spotify.sync import synchronize
@@ -766,15 +768,22 @@ class StateAndSyncTests(unittest.TestCase):
                 [release], ["3812903"], spotify, discogs, state, app_config(), dry_run=False
             )
             writes_after_first = list(spotify.writes)
+            state.update_sync_progress(
+                "RUNNING",
+                current_release_id=release.release_id,
+                completed_releases=0,
+                pending_releases=1,
+            )
             second = synchronize(
                 [release], ["3812903"], spotify, discogs, state, app_config(), dry_run=False
             )
             state.close()
         self.assertEqual(first.playlists_created, 1)
-        self.assertEqual(second.playlists_unchanged, 1)
+        self.assertEqual(second.releases_processed, 0)
+        self.assertEqual(second.plans, [])
         self.assertEqual(spotify.writes, writes_after_first)
         self.assertEqual(spotify.search_calls, ["The Waterfront"])
-        self.assertEqual(second.tracks_resolved_from_cache, 1)
+        self.assertEqual(second.tracks_resolved_from_cache, 0)
         self.assertEqual(first.artwork_updates, 1)
         self.assertEqual(second.artwork_updates, 0)
         self.assertEqual(second.description_updates, 0)
@@ -791,9 +800,11 @@ class StateAndSyncTests(unittest.TestCase):
             )
             previous_writes = list(spotify.writes)
             spotify.search_results = {"The Waterfront": []}
+            changed_config = app_config()
+            changed_config["PLAYLIST_DESCRIPTION"] = False
             report = synchronize(
                 [release], ["3812903"], spotify, discogs, state,
-                app_config(), dry_run=False,
+                changed_config, dry_run=False,
             )
             state.close()
         self.assertEqual(report.tracks_matched, 1)
@@ -881,7 +892,7 @@ class StateAndSyncTests(unittest.TestCase):
         self.assertEqual(resumed.releases_pending, 0)
         self.assertFalse(resumed.limit_reached)
 
-    def test_max_releases_cursor_advances_between_runs(self):
+    def test_max_releases_batches_only_pending_releases(self):
         releases = [
             sample_release(str(release_id), [
                 DiscogsTrack(
@@ -894,7 +905,7 @@ class StateAndSyncTests(unittest.TestCase):
                     1980,
                 )
             ])
-            for release_id in range(1, 4)
+            for release_id in range(1, 13)
         ]
         spotify = FakeSpotify({
             "Song {}".format(release_id): [
@@ -903,26 +914,155 @@ class StateAndSyncTests(unittest.TestCase):
                     spotify_id="spotify-{}".format(release_id),
                 )
             ]
-            for release_id in range(1, 4)
+            for release_id in range(1, 13)
         })
         with tempfile.TemporaryDirectory() as directory:
             state = self._state(directory)
             first = synchronize(
-                releases, ["1", "2", "3"], spotify, FakeDiscogs(), state,
+                releases[:2], [str(i) for i in range(1, 13)],
+                spotify, FakeDiscogs(), state, app_config(), dry_run=False,
+            )
+            second = synchronize(
+                releases, [str(i) for i in range(1, 13)],
+                spotify, FakeDiscogs(), state, app_config(), dry_run=False,
+                max_releases=4,
+            )
+            third = synchronize(
+                releases, [str(i) for i in range(1, 13)],
+                spotify, FakeDiscogs(), state, app_config(), dry_run=False,
+                max_releases=10,
+            )
+            state.close()
+        self.assertEqual(first.releases_processed, 2)
+        self.assertEqual(
+            [plan.release.release_id for plan in second.plans], ["3", "4", "5", "6"]
+        )
+        self.assertEqual(second.releases_processed, 4)
+        self.assertEqual(second.releases_completed, 6)
+        self.assertEqual(second.releases_pending, 6)
+        self.assertTrue(second.limit_reached)
+        self.assertEqual(
+            [plan.release.release_id for plan in third.plans],
+            ["7", "8", "9", "10", "11", "12"],
+        )
+        self.assertEqual(third.releases_processed, 6)
+        self.assertEqual(third.releases_pending, 0)
+        self.assertFalse(third.limit_reached)
+
+    def test_failed_release_is_retried_before_later_pending_work(self):
+        release = sample_release()
+        later_release = sample_release(
+            "2",
+            [DiscogsTrack("2", "A1", 0, "Later Song", "Artist", "Album", 1970)],
+        )
+        spotify = FakeSpotify({
+            "The Waterfront": [candidate()],
+            "Later Song": [
+                candidate("later", "Later Song", "Artist", "Album", 1970)
+            ],
+        })
+        original_search = spotify.search_tracks
+        fail_once = [True]
+
+        def fail_first_search(track):
+            if fail_once[0]:
+                fail_once[0] = False
+                raise APIError("Spotify", 500, "/v1/search", "temporary failure")
+            return original_search(track)
+
+        spotify.search_tracks = fail_first_search
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(directory)
+            failed = synchronize(
+                [release, later_release], [release.release_id, later_release.release_id],
+                spotify, FakeDiscogs(), state,
+                app_config(), dry_run=False, max_releases=1,
+            )
+            self.assertEqual(failed.releases_pending, 2)
+            retried = synchronize(
+                [release, later_release], [release.release_id, later_release.release_id],
+                spotify, FakeDiscogs(), state,
                 app_config(), dry_run=False, max_releases=1,
             )
             state.close()
+        self.assertEqual(retried.releases_processed, 1)
+        self.assertEqual(retried.releases_pending, 1)
+        self.assertEqual(
+            [plan.release.release_id for plan in retried.plans], [release.release_id]
+        )
+        self.assertEqual(spotify.search_calls, ["The Waterfront"])
+
+    def test_changed_release_source_is_scheduled_again_and_reuses_playlist(self):
+        original = sample_release()
+        changed = sample_release(
+            tracks=[
+                DiscogsTrack(
+                    "3812903", "A1", 0, "Changed Waterfront",
+                    "John Lee Hooker", "The Real Folk Blues", 1980,
+                )
+            ]
+        )
+        spotify = FakeSpotify({
+            "The Waterfront": [candidate()],
+            "Changed Waterfront": [
+                candidate(title="Changed Waterfront", spotify_id="spotify-2")
+            ],
+        })
+        with tempfile.TemporaryDirectory() as directory:
             state = self._state(directory)
+            first = synchronize(
+                [original], [original.release_id], spotify, FakeDiscogs(), state,
+                app_config(), dry_run=False,
+            )
+            playlist_id = state.get_release(original.release_id)["playlist_id"]
             second = synchronize(
-                releases, ["1", "2", "3"], spotify, FakeDiscogs(), state,
-                app_config(), dry_run=False, max_releases=1,
+                [changed], [changed.release_id], spotify, FakeDiscogs(), state,
+                app_config(), dry_run=False,
+            )
+            updated = state.get_release(changed.release_id)
+            state.close()
+        self.assertEqual(first.playlists_created, 1)
+        self.assertEqual(second.releases_processed, 1)
+        self.assertEqual(second.playlists_updated, 1)
+        self.assertEqual(updated["playlist_id"], playlist_id)
+        self.assertEqual(
+            spotify.playlists[playlist_id]["_tracks"],
+            [{"uri": "spotify:track:spotify-2"}],
+        )
+
+    def test_quota_pause_during_playlist_inventory_is_resumable(self):
+        release = sample_release()
+
+        class InventoryQuotaSpotify(FakeSpotify):
+            blocked = True
+
+            def list_playlists(self):
+                if self.blocked:
+                    raise SpotifyRateLimitError(
+                        "/v1/me/playlists", 84108, "Daily quota", "QUOTA_EXCEEDED"
+                    )
+                return super().list_playlists()
+
+        spotify = InventoryQuotaSpotify({"The Waterfront": [candidate()]})
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(directory)
+            paused = synchronize(
+                [release], [release.release_id], spotify, FakeDiscogs(), state,
+                app_config(), dry_run=False,
             )
             progress = state.sync_progress()
+            self.assertEqual(progress["status"], "PAUSED")
+            self.assertEqual(progress["current_release_id"], None)
+            self.assertEqual(paused.releases_pending, 1)
+            self.assertEqual(spotify.search_calls, [])
+            spotify.blocked = False
+            resumed = synchronize(
+                [release], [release.release_id], spotify, FakeDiscogs(), state,
+                app_config(), dry_run=False,
+            )
             state.close()
-        self.assertEqual([plan.release.release_id for plan in first.plans], ["1"])
-        self.assertEqual([plan.release.release_id for plan in second.plans], ["2"])
-        self.assertEqual(progress["current_release_id"], "2")
-        self.assertTrue(second.limit_reached)
+        self.assertEqual(resumed.releases_processed, 1)
+        self.assertEqual(resumed.releases_pending, 0)
 
     def test_successful_search_before_quota_pause_is_saved_independently(self):
         tracks = [
@@ -987,18 +1127,111 @@ class StateAndSyncTests(unittest.TestCase):
 
     def test_keyboard_interrupt_is_persisted_for_resume(self):
         class InterruptingSpotify(FakeSpotify):
+            blocked = True
+
             def search_tracks(self, track):
-                raise KeyboardInterrupt()
+                if self.blocked:
+                    raise KeyboardInterrupt()
+                return super().search_tracks(track)
 
         with tempfile.TemporaryDirectory() as directory:
             state = self._state(directory)
+            spotify = InterruptingSpotify({"The Waterfront": [candidate()]})
             with self.assertRaises(KeyboardInterrupt):
                 synchronize(
-                    [sample_release()], ["3812903"], InterruptingSpotify(),
+                    [sample_release()], ["3812903"], spotify,
                     FakeDiscogs(), state, app_config(), dry_run=False,
                 )
             self.assertEqual(state.sync_progress()["status"], "INTERRUPTED")
             state.close()
+            state = self._state(directory)
+            spotify.blocked = False
+            resumed = synchronize(
+                [sample_release()], ["3812903"], spotify, FakeDiscogs(),
+                state, app_config(), dry_run=False,
+            )
+            state.close()
+        self.assertEqual(resumed.releases_processed, 1)
+        self.assertEqual(resumed.releases_pending, 0)
+
+    def test_second_sync_process_is_rejected_before_external_clients_run(self):
+        source_root = str(Path(__file__).resolve().parents[1] / "src")
+        lock_holder = (
+            "import sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from discogs2spotify.process_lock import SyncProcessLock\n"
+            "lock = SyncProcessLock(sys.argv[2])\n"
+            "lock.acquire()\n"
+            "print('locked', flush=True)\n"
+            "sys.stdin.readline()\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "discogs2spotify.conf"
+            state_path = Path(directory) / "state.db"
+            config_path.write_text(
+                "DISCOGS_USER=bradz667\n"
+                "STATE_FILE={}\n"
+                "DRY_RUN=false\n".format(state_path),
+                encoding="utf-8",
+            )
+            holder = subprocess.Popen(
+                [sys.executable, "-c", lock_holder, source_root, str(state_path)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                self.assertEqual(holder.stdout.readline().strip(), "locked")
+                output = StringIO()
+                with mock.patch.object(
+                    main_module, "DiscogsClient"
+                ) as discogs_client, mock.patch.object(
+                    main_module, "SpotifyClient"
+                ) as spotify_client, mock.patch.object(
+                    main_module, "read_discogs_token"
+                ) as read_token, redirect_stderr(output):
+                    exit_code = main_module.main(["--config", str(config_path)])
+                self.assertEqual(exit_code, 1)
+                self.assertIn("Another synchronization process is already running", output.getvalue())
+                discogs_client.assert_not_called()
+                spotify_client.assert_not_called()
+                read_token.assert_not_called()
+            finally:
+                if holder.poll() is None:
+                    holder.terminate()
+                holder.communicate(timeout=5)
+
+    def test_process_lock_is_recovered_after_holder_terminates(self):
+        source_root = str(Path(__file__).resolve().parents[1] / "src")
+        lock_holder = (
+            "import sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from discogs2spotify.process_lock import SyncProcessLock\n"
+            "lock = SyncProcessLock(sys.argv[2])\n"
+            "lock.acquire()\n"
+            "print('locked', flush=True)\n"
+            "sys.stdin.readline()\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state.db"
+            holder = subprocess.Popen(
+                [sys.executable, "-c", lock_holder, source_root, str(state_path)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                self.assertEqual(holder.stdout.readline().strip(), "locked")
+                holder.terminate()
+                holder.communicate(timeout=5)
+                with SyncProcessLock(state_path):
+                    pass
+            finally:
+                if holder.poll() is None:
+                    holder.terminate()
+                    holder.communicate(timeout=5)
 
     def test_legacy_state_schema_is_migrated_without_data_loss(self):
         with tempfile.TemporaryDirectory() as directory:
