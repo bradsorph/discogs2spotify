@@ -1,4 +1,7 @@
+discogs2spotify.conf
 config.json
+config.yaml
 .discogs2spotify.sqlite3
 .discogs2spotify.sqlite3-journal
+state.db
 __pycache__/
