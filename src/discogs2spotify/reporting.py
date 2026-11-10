@@ -15,15 +15,15 @@ def print_report(report, dry_run, root_name):
         if plan.duplicate_playlist_ids:
             label = "DUPLICATE"
         print(
-            "  {:9} {}/{} (Discogs {})".format(
+            "  {:9} {} (Discogs {})".format(
                 label,
-                plan.release.folder_name,
                 plan.playlist_name,
                 plan.release.release_id,
             )
         )
         if plan.duplicate_playlist_ids:
             print("            Spotify IDs: {}".format(", ".join(plan.duplicate_playlist_ids)))
+        print("            NAME {}".format(plan.name_status))
         print("            COVER {}".format(plan.cover_status))
         print("            DESCRIPTION {}".format(plan.description_status))
     print()

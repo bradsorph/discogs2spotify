@@ -16,6 +16,17 @@ from pathlib import Path
 from .errors import SyncError
 
 
+def _as_bool(value, key):
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("true", "1", "yes", "on"):
+        return True
+    if text in ("false", "0", "no", "off", ""):
+        return False
+    raise SyncError("{} must be true or false".format(key))
+
+
 AUTHORIZE_URL = "https://accounts.spotify.com/authorize"
 TOKEN_URL = "https://accounts.spotify.com/api/token"
 BASE_SCOPES = (
@@ -68,7 +79,7 @@ class SpotifyTokenManager:
         self.client_id_path = self.config_dir / "spotify-client-id"
         self.token_path = self.config_dir / "spotify-token"
         self.redirect_uri = redirect_uri
-        self.public_playlists = public_playlists
+        self.public_playlists = _as_bool(public_playlists, "public_playlists")
         self.opener = opener
 
     def _client_id(self):

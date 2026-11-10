@@ -126,7 +126,7 @@ def _release_sync_signature(release, config):
         "release_id": release.release_id,
         "folder_id": release.folder_id,
         "folder_name": release.folder_name,
-        "playlist_name": playlist_name(release),
+        "playlist_name": playlist_name(release, config),
         "description": stable_hash(generate_description(release, config)),
         "artwork_url": _image_url(release, config),
         "tracks": [
@@ -151,6 +151,7 @@ def build_release_plan(
     release, spotify, discogs, state, config, playlists_by_release,
     report, dry_run=True, unmanaged_names=None,
 ):
+    target_playlist_name = playlist_name(release, config)
     description = generate_description(release, config)
     description_hash = stable_hash(description)
     stored = state.get_release(release.release_id)
@@ -165,11 +166,11 @@ def build_release_plan(
         playlist_id = duplicate_ids[0] if len(duplicate_ids) == 1 else None
         playlist_action = "EXIST" if playlist_id else "CREATE"
 
-    name_collisions = (unmanaged_names or {}).get(playlist_name(release), [])
+    name_collisions = (unmanaged_names or {}).get(target_playlist_name, [])
     if not playlist_id and name_collisions:
         return ReleasePlan(
             release=release,
-            playlist_name=playlist_name(release),
+            playlist_name=target_playlist_name,
             playlist_id=None,
             playlist_action="COLLISION",
             tracks=release.tracks,
@@ -185,7 +186,7 @@ def build_release_plan(
     if len(set(duplicate_ids)) > 1:
         return ReleasePlan(
             release=release,
-            playlist_name=playlist_name(release),
+            playlist_name=target_playlist_name,
             playlist_id=playlist_id,
             playlist_action="DUPLICATE",
             tracks=release.tracks,
@@ -222,6 +223,9 @@ def build_release_plan(
         # If a playlist contains unmatched legacy items whose mapping is unknown,
         # preserve the current sequence rather than deleting potentially valid tracks.
         desired_uris = list(current_uris)
+    name_status = "CREATED" if not playlist_id else (
+        "UPDATED" if playlist.get("name") != target_playlist_name else "UNCHANGED"
+    )
     description_status = "UNCHANGED"
     if not playlist_id:
         description_status = "CREATED"
@@ -258,12 +262,17 @@ def build_release_plan(
     tracklist_changed = desired_uris != current_uris
     description_changed = description_status in ("CREATED", "UPDATED")
     cover_changed = cover_status in ("CREATED", "UPDATED")
-    if playlist_id and (tracklist_changed or description_changed or cover_changed):
+    if playlist_id and (
+        name_status == "UPDATED"
+        or tracklist_changed
+        or description_changed
+        or cover_changed
+    ):
         playlist_action = "UPDATE"
 
     return ReleasePlan(
         release=release,
-        playlist_name=playlist_name(release),
+        playlist_name=target_playlist_name,
         playlist_id=playlist_id,
         playlist_action=playlist_action,
         tracks=release.tracks,
@@ -276,6 +285,7 @@ def build_release_plan(
         artwork_bytes=artwork_bytes,
         artwork_jpeg=artwork_jpeg,
         cover_status=cover_status,
+        name_status=name_status,
         description_status=description_status,
         duplicate_track_matches=duplicate_tracks,
         cache_signatures=cache_signatures,
@@ -336,10 +346,24 @@ def _apply_plan(
             playlist_id, plan.playlist_name,
         )
 
-    if plan.description_status in ("CREATED", "UPDATED") and not created_now:
-        spotify.update_description(playlist_id, plan.description)
-        state.update_hashes(release.release_id, description_hash=plan.description_hash)
-        report.description_updates += 1
+    if not created_now and (
+        plan.name_status == "UPDATED"
+        or plan.description_status in ("CREATED", "UPDATED")
+    ):
+        spotify.update_playlist(
+            playlist_id,
+            name=plan.playlist_name if plan.name_status == "UPDATED" else None,
+            description=(
+                plan.description
+                if plan.description_status in ("CREATED", "UPDATED")
+                else None
+            ),
+        )
+        if plan.description_status in ("CREATED", "UPDATED"):
+            state.update_hashes(
+                release.release_id, description_hash=plan.description_hash
+            )
+            report.description_updates += 1
     elif config["PLAYLIST_DESCRIPTION"] and plan.description_status == "UNCHANGED":
         state.update_hashes(release.release_id, description_hash=plan.description_hash)
 
@@ -619,11 +643,11 @@ def synchronize(
                             report.tracks_rejected += 1
                     if verbose:
                         LOGGER.info(
-                            "%s | %s/%s | %s | COVER %s | DESCRIPTION %s",
+                            "%s | %s | %s | NAME %s | COVER %s | DESCRIPTION %s",
                             plan.playlist_action,
-                            release.folder_name,
                             plan.playlist_name,
                             release.release_id,
+                            plan.name_status,
                             plan.cover_status,
                             plan.description_status,
                         )

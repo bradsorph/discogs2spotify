@@ -11,8 +11,10 @@ The tool creates one playlist per unique Discogs release. It uses exact release
 IDs internally, the Discogs tracklist as the playlist order, and release-specific
 artwork and edition metadata. It does not create physical playlist folders:
 Spotify's Web API cannot manage playlist folders. Discogs folder associations
-are retained in SQLite and folder names appear in reports. `SPOTIFY_PLAYLIST_ROOT`
-is the intended logical root, not a fake Spotify playlist.
+are retained in SQLite and folder names appear in reports. Playlist names use
+the logical path `SPOTIFY_PLAYLIST_ROOT/Discogs folder/Release`, so the root and
+folder are visible in Spotify's playlist list but are not actual directories.
+Managed playlists are renamed to this path on their next synchronization.
 
 ## Install
 
@@ -139,6 +141,9 @@ options override the config; `--verbose` also enables per-release details.
 Description settings can enable/disable playlist descriptions, catalog number,
 format, genre, style, notes, matrix, and Discogs URL. Available Discogs data is
 included without inventing fields. The release URL is included by default.
+Generated descriptions are single-line and limited to 300 UTF-8 bytes; they
+start with the Discogs release marker and retain the optional URL so playlists
+can be recovered if local state is lost.
 Artwork uses the primary image of the exact Discogs release by default;
 `ARTWORK_IMAGE_INDEX` may select another zero-based image index. Artwork is
 converted/compressed in memory to a JPEG whose base64 payload is no larger than
