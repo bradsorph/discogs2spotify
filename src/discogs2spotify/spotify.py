@@ -3,8 +3,19 @@ import json
 import urllib.parse
 
 from .api import HTTPTransport, json_request
-from .errors import APIError
+from .errors import APIError, SyncError
 from .matching import candidate_from_spotify
+
+
+def _as_bool(value, key):
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("true", "1", "yes", "on"):
+        return True
+    if text in ("false", "0", "no", "off", ""):
+        return False
+    raise SyncError("{} must be true or false".format(key))
 
 
 BASE_URL = "https://api.spotify.com/v1"
@@ -108,10 +119,11 @@ class SpotifyClient:
         return [candidate for item in results if (candidate := candidate_from_spotify(item))]
 
     def create_playlist(self, name, description, public=False):
+        public = _as_bool(public, "public")
         return self._json(
             "/me/playlists",
             method="POST",
-            payload={"name": name, "description": description, "public": bool(public)},
+            payload={"name": name, "description": description, "public": public},
         )
 
     def update_description(self, playlist_id, description):

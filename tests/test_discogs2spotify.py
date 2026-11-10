@@ -415,6 +415,23 @@ class MatchingTests(unittest.TestCase):
 
 
 class HTTPTests(unittest.TestCase):
+    def test_debug_logging_reports_binary_payload_size_without_contents(self):
+        response = mock.MagicMock(read=mock.Mock(return_value=b"ok"))
+        response.__enter__.return_value = response
+        with mock.patch("urllib.request.urlopen", return_value=response):
+            transport = HTTPTransport(delay=0, retries=0)
+            with self.assertLogs("discogs2spotify.api", level="DEBUG") as logs:
+                transport.request(
+                    "Spotify",
+                    "https://api.spotify.com/v1/playlists/test/images",
+                    method="PUT",
+                    headers={"Content-Type": "image/jpeg"},
+                    data=b"binary-image-data",
+                )
+        output = "\n".join(logs.output)
+        self.assertIn("payload=<image/jpeg; 17 bytes>", output)
+        self.assertNotIn("binary-image-data", output)
+
     def test_retries_rate_limit_then_succeeds(self):
         sleeps = []
         responses = [
@@ -513,6 +530,23 @@ class SpotifySearchTests(unittest.TestCase):
         self.assertNotIn('"', query["q"][0])
         self.assertEqual(query["type"], ["track"])
         self.assertEqual(query["limit"], ["10"])
+
+    def test_create_playlist_coerces_boolean_strings_before_sending_payload(self):
+        class FakeTransport:
+            payload = None
+
+            def request(self, service, url, method="GET", headers=None, data=None):
+                self.payload = json.loads(data.decode("utf-8"))
+                return b'{"id":"created-id"}'
+
+        class FakeTokenManager:
+            def access_token(self):
+                return "fake"
+
+        transport = FakeTransport()
+        client = SpotifyClient(FakeTokenManager(), transport=transport)
+        client.create_playlist("My playlist", "Description", public="false")
+        self.assertFalse(transport.payload["public"])
 
 
 class StateAndSyncTests(unittest.TestCase):
@@ -1458,6 +1492,12 @@ class OAuthTests(unittest.TestCase):
             manager._check_scopes(
                 {"scope": "playlist-read-private playlist-modify-private ugc-image-upload"}
             )
+
+    def test_boolean_strings_are_coerced_for_public_playlist_option(self):
+        manager = SpotifyTokenManager(public_playlists="false")
+        self.assertFalse(manager.public_playlists)
+        manager = SpotifyTokenManager(public_playlists="true")
+        self.assertTrue(manager.public_playlists)
 
     def test_token_file_is_owner_only(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -24,6 +24,33 @@ class HTTPTransport:
 
     def request(self, service, url, method="GET", headers=None, data=None):
         host = urlsplit(url).netloc
+        if data is not None and LOGGER.isEnabledFor(logging.DEBUG):
+            content_type = next(
+                (
+                    value
+                    for key, value in (headers or {}).items()
+                    if key.lower() == "content-type"
+                ),
+                "unknown",
+            )
+            endpoint = urlsplit(url).path or "/"
+            if content_type.split(";", 1)[0].strip().lower() == "application/json":
+                LOGGER.debug(
+                    "%s %s %s payload=%s",
+                    service,
+                    method,
+                    endpoint,
+                    data.decode("utf-8", errors="replace"),
+                )
+            else:
+                LOGGER.debug(
+                    "%s %s %s payload=<%s; %d bytes>",
+                    service,
+                    method,
+                    endpoint,
+                    content_type,
+                    len(data),
+                )
         for attempt in range(self.retries + 1):
             elapsed = time.monotonic() - self.last_request.get(host, 0)
             if self.delay > elapsed:
@@ -44,6 +71,13 @@ class HTTPTransport:
                     self.rate_limit_count += 1
                 try:
                     error_body = error.read(4096).decode("utf-8", errors="replace")
+                    LOGGER.debug(
+                        "%s %s %s response=%s",
+                        service,
+                        method,
+                        endpoint,
+                        error_body,
+                    )
                     parsed_error = json.loads(error_body)
                     error_info = (
                         parsed_error.get("error")
