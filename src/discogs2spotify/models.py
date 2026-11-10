@@ -67,6 +67,7 @@ class ReleasePlan:
     artwork_bytes: Optional[bytes] = None
     artwork_jpeg: Optional[bytes] = None
     cover_status: str = "MISSING"
+    name_status: str = "UNCHANGED"
     description_status: str = "UNCHANGED"
     duplicate_track_matches: int = 0
     duplicate_playlist_ids: List[str] = field(default_factory=list)

@@ -25,7 +25,12 @@ from discogs2spotify.discogs import DiscogsClient, release_from_api
 from discogs2spotify.errors import APIError, SpotifyRateLimitError, SyncError
 from discogs2spotify.matching import match_track, normalize_text
 from discogs2spotify import main as main_module
-from discogs2spotify.metadata import generate_description, playlist_name, stable_hash
+from discogs2spotify.metadata import (
+    discogs_marker,
+    generate_description,
+    playlist_name,
+    stable_hash,
+)
 from discogs2spotify.models import (
     DiscogsRelease,
     DiscogsTrack,
@@ -178,6 +183,14 @@ class FakeSpotify:
     def update_description(self, playlist_id, description):
         self.playlists[str(playlist_id)]["description"] = description
         self.writes.append(("description", playlist_id))
+
+    def update_playlist(self, playlist_id, name=None, description=None):
+        playlist = self.playlists[str(playlist_id)]
+        if name is not None:
+            playlist["name"] = name
+        if description is not None:
+            playlist["description"] = description
+        self.writes.append(("playlist", playlist_id, name, description))
 
     def replace_tracks(self, playlist_id, uris):
         playlist = self.playlists[str(playlist_id)]
@@ -399,6 +412,16 @@ class MatchingTests(unittest.TestCase):
         release.title = "A" * 150
         self.assertLessEqual(len(playlist_name(release)), 100)
 
+    def test_playlist_name_uses_root_and_discogs_folder_as_path_prefix(self):
+        name = playlist_name(
+            sample_release(),
+            {"SPOTIFY_PLAYLIST_ROOT": "Vinyl collection"},
+        )
+        self.assertEqual(
+            name,
+            "Vinyl collection/Blues/John Lee Hooker_The Real Folk Blues_France_1980",
+        )
+
     def test_description_includes_available_edition_metadata_and_is_hashed(self):
         release = sample_release()
         config = app_config()
@@ -412,6 +435,21 @@ class MatchingTests(unittest.TestCase):
         self.assertEqual(stable_hash(description), stable_hash(description))
         config["DESCRIPTION_INCLUDE_DISCOGS_URL"] = False
         self.assertNotIn("https://www.discogs.com", generate_description(release, config))
+
+    def test_description_respects_utf8_byte_limit_and_keeps_discogs_marker(self):
+        release = sample_release()
+        release.raw["notes"] = "é" * 500
+        description = generate_description(release, app_config())
+        self.assertLessEqual(len(description.encode("utf-8")), 300)
+        self.assertEqual(discogs_marker(description), "3812903")
+        self.assertTrue(
+            description.endswith("https://www.discogs.com/release/3812903")
+        )
+        self.assertNotIn("\n", description)
+        self.assertEqual(
+            discogs_marker("Details\nDiscogs release: 3812903\nhttps://example.test"),
+            "3812903",
+        )
 
 
 class HTTPTests(unittest.TestCase):
@@ -548,10 +586,76 @@ class SpotifySearchTests(unittest.TestCase):
         client.create_playlist("My playlist", "Description", public="false")
         self.assertFalse(transport.payload["public"])
 
+    def test_update_playlist_can_rename_and_update_description_together(self):
+        class FakeTransport:
+            request_data = None
+            request_url = None
+            request_method = None
+
+            def request(self, service, url, method="GET", headers=None, data=None):
+                self.request_data = json.loads(data.decode("utf-8"))
+                self.request_url = url
+                self.request_method = method
+                return b"{}"
+
+        class FakeTokenManager:
+            def access_token(self):
+                return "fake"
+
+        transport = FakeTransport()
+        client = SpotifyClient(FakeTokenManager(), transport=transport)
+        client.update_playlist(
+            "playlist-id",
+            name="Collection/Soundtrack/Release",
+            description="Discogs release: 3812903 · Label",
+        )
+        self.assertEqual(transport.request_method, "PUT")
+        self.assertTrue(transport.request_url.endswith("/playlists/playlist-id"))
+        self.assertEqual(
+            transport.request_data,
+            {
+                "name": "Collection/Soundtrack/Release",
+                "description": "Discogs release: 3812903 · Label",
+            },
+        )
+
 
 class StateAndSyncTests(unittest.TestCase):
     def _state(self, directory, readonly=False):
         return StateStore(Path(directory) / "state.db", readonly=readonly)
+
+    def test_existing_managed_playlist_is_renamed_to_root_and_folder_path(self):
+        release = sample_release(tracks=[])
+        release.raw["images"] = []
+        playlist = {
+            "id": "managed-1",
+            "name": "Old playlist name",
+            "description": "Discogs release: 3812903",
+            "images": [],
+            "_tracks": [],
+        }
+        spotify = FakeSpotify(playlists={"managed-1": playlist})
+        config = app_config()
+        config["SPOTIFY_PLAYLIST_ROOT"] = "Vinyl collection"
+        config["PLAYLIST_DESCRIPTION"] = False
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(directory)
+            report = synchronize(
+                [release],
+                ["3812903"],
+                spotify,
+                FakeDiscogs(),
+                state,
+                config,
+                dry_run=False,
+            )
+            state.close()
+        self.assertEqual(
+            playlist["name"],
+            "Vinyl collection/Blues/John Lee Hooker_The Real Folk Blues_France_1980",
+        )
+        self.assertEqual(report.playlists_updated, 1)
+        self.assertEqual(report.plans[0].name_status, "UPDATED")
 
     def test_rate_limit_pauses_sync_without_searching_following_tracks(self):
         tracks = [
@@ -1359,7 +1463,7 @@ class StateAndSyncTests(unittest.TestCase):
 
     def test_unmanaged_same_name_playlist_is_not_modified_or_duplicated(self):
         release = sample_release()
-        name = "John Lee Hooker_The Real Folk Blues_France_1980"
+        name = playlist_name(release, app_config())
         spotify = FakeSpotify(
             playlists={
                 "unmanaged": {

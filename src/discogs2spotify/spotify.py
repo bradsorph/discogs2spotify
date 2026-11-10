@@ -126,12 +126,22 @@ class SpotifyClient:
             payload={"name": name, "description": description, "public": public},
         )
 
-    def update_description(self, playlist_id, description):
+    def update_playlist(self, playlist_id, name=None, description=None):
+        payload = {}
+        if name is not None:
+            payload["name"] = name
+        if description is not None:
+            payload["description"] = description
+        if not payload:
+            return {}
         return self._json(
             "/playlists/{}".format(urllib.parse.quote(str(playlist_id), safe="")),
             method="PUT",
-            payload={"description": description},
+            payload=payload,
         )
+
+    def update_description(self, playlist_id, description):
+        return self.update_playlist(playlist_id, description=description)
 
     def replace_tracks(self, playlist_id, uris):
         path = self._playlist_item_path(playlist_id)
