@@ -1,10 +1,17 @@
 import logging
 import hashlib
 import json
+import math
 from .artwork import UnusableArtwork, make_spotify_jpeg, select_release_image
 from .errors import APIError, SyncError
-from .matching import match_track, normalize_text
-from .metadata import discogs_marker, generate_description, playlist_name, stable_hash
+from .matching import match_track, normalize_text, score_album_candidate
+from .metadata import (
+    discogs_marker,
+    generate_description,
+    playlist_name,
+    playlist_names,
+    stable_hash,
+)
 from .models import ReleasePlan, SyncReport, TrackMatch
 
 LOGGER = logging.getLogger("discogs2spotify")
@@ -28,14 +35,108 @@ def _track_cache_signature(track, settings):
     ).hexdigest()
 
 
+def _album_first_matches(release, tracks, spotify, settings):
+    search_albums = getattr(spotify, "search_albums", None)
+    get_album_tracks = getattr(spotify, "album_tracks", None)
+    if not tracks or not callable(search_albums) or not callable(get_album_tracks):
+        return {}, "NO MATCH"
+
+    albums = search_albums(release)
+    ranked = []
+    for album in albums:
+        score, reason = score_album_candidate(release, album)
+        if score is not None and not reason:
+            ranked.append((score, album))
+    ranked.sort(key=lambda item: (-item[0], item[1].spotify_id))
+    if not ranked:
+        LOGGER.debug(
+            "Album match release=%s result=NO_MATCH candidates=%d",
+            release.release_id,
+            len(albums),
+        )
+        return {}, "NO MATCH"
+
+    accepted = []
+    top_score = ranked[0][0]
+    for album_score, album in ranked:
+        if accepted and album_score < top_score - 4.0:
+            break
+        album_tracks = get_album_tracks(album)
+        matched_tracks = {}
+        for track in tracks:
+            match = match_track(
+                track,
+                album_tracks,
+                threshold=settings["MATCH_THRESHOLD"],
+                ambiguous_action=settings["AMBIGUOUS_MATCH_ACTION"],
+            )
+            if match.status == "MATCHED" and match.uri:
+                matched_tracks[track.key] = TrackMatch(
+                    status=match.status,
+                    spotify_id=match.spotify_id,
+                    uri=match.uri,
+                    score=match.score,
+                    reason="album tracklist: " + match.reason,
+                    candidate_count=match.candidate_count,
+                )
+
+        match_count = len(matched_tracks)
+        overlap = match_count / float(len(tracks))
+        album_track_count = album.total_tracks or len(album_tracks)
+        album_overlap = (
+            match_count / float(album_track_count) if album_track_count else 0.0
+        )
+        minimum_matches = max(1, int(math.ceil(len(tracks) * 0.35)))
+        if len(tracks) <= 3 and album_score >= 96.0 and match_count:
+            minimum_matches = 1
+        if match_count < minimum_matches or album_overlap < 0.2:
+            continue
+
+        evidence = (
+            album_score * 0.35
+            + overlap * 100.0 * 0.5
+            + album_overlap * 100.0 * 0.15
+        )
+        accepted.append((evidence, album_score, album, matched_tracks))
+
+    if not accepted:
+        LOGGER.debug(
+            "Album match release=%s result=NO_MATCH plausible_candidates=%d",
+            release.release_id,
+            len(ranked),
+        )
+        return {}, "NO MATCH"
+
+    accepted.sort(key=lambda item: (-item[0], item[2].spotify_id))
+    if len(accepted) > 1 and accepted[0][0] - accepted[1][0] < 3.0:
+        LOGGER.debug(
+            "Album match release=%s result=AMBIGUOUS candidates=%s",
+            release.release_id,
+            ",".join(item[2].spotify_id for item in accepted[:2]),
+        )
+        return {}, "AMBIGUOUS MATCH"
+
+    evidence, album_score, album, matched_tracks = accepted[0]
+    status = "FULL MATCH" if len(matched_tracks) == len(tracks) else "PARTIAL MATCH"
+    LOGGER.debug(
+        "Album match release=%s album=%s artist_title_score=%.1f overlap=%d/%d result=%s evidence=%.1f",
+        release.release_id,
+        album.spotify_id,
+        album_score,
+        len(matched_tracks),
+        len(tracks),
+        status,
+        evidence,
+    )
+    return matched_tracks, status
+
+
 def _resolve_tracks(
     release, spotify, previous, settings, state, dry_run, report
 ):
-    matches = []
+    cached_matches = {}
+    pending_tracks = []
     cache_signatures = []
-    uris = []
-    source_by_uri = {}
-    duplicate_count = 0
     for track in release.tracks:
         cache_signature = _track_cache_signature(track, settings)
         cache_signatures.append(cache_signature)
@@ -46,7 +147,7 @@ def _resolve_tracks(
             and cached.get("spotify_id")
             and cached.get("spotify_uri")
         ):
-            match = TrackMatch(
+            cached_matches[track.key] = TrackMatch(
                 "MATCHED",
                 cached["spotify_id"],
                 cached["spotify_uri"],
@@ -55,6 +156,26 @@ def _resolve_tracks(
                 1,
             )
             report.tracks_resolved_from_cache += 1
+        else:
+            pending_tracks.append(track)
+
+    album_matches, album_status = _album_first_matches(
+        release, pending_tracks, spotify, settings
+    )
+    matches = []
+    uris = []
+    source_by_uri = {}
+    duplicate_count = 0
+    for track, cache_signature in zip(release.tracks, cache_signatures):
+        cached = previous.get(track.key, {})
+        if track.key in cached_matches:
+            match = cached_matches[track.key]
+        elif track.key in album_matches:
+            match = album_matches[track.key]
+            if not dry_run and not state.readonly:
+                state.record_track(
+                    release.release_id, track, match, cache_signature
+                )
         else:
             report.tracks_searched += 1
             candidates = spotify.search_tracks(track)
@@ -111,7 +232,18 @@ def _resolve_tracks(
         and not any(previous.get(track.key, {}).get("spotify_uri") for track in release.tracks)
     ):
         uris = []
-    return matches, uris, duplicate_count, cache_signatures
+    matched_count = sum(match.status == "MATCHED" and bool(match.uri) for match in matches)
+    if matches and matched_count == len(matches):
+        match_status = "FULL MATCH"
+    elif matched_count:
+        match_status = "PARTIAL MATCH"
+    elif any(match.status == "AMBIGUOUS" for match in matches):
+        match_status = "AMBIGUOUS MATCH"
+    elif album_status == "AMBIGUOUS MATCH":
+        match_status = "AMBIGUOUS MATCH"
+    else:
+        match_status = "NO MATCH"
+    return matches, uris, duplicate_count, cache_signatures, match_status
 
 
 def _image_url(release, config):
@@ -121,12 +253,14 @@ def _image_url(release, config):
     return (image or {}).get("uri") if image else None
 
 
-def _release_sync_signature(release, config):
+def _release_sync_signature(release, config, target_playlist_name=None):
     signature = {
         "release_id": release.release_id,
         "folder_id": release.folder_id,
         "folder_name": release.folder_name,
-        "playlist_name": playlist_name(release, config),
+        "playlist_name": target_playlist_name or playlist_name(
+            release, config.get("SPOTIFY_PLAYLIST_ROOT")
+        ),
         "description": stable_hash(generate_description(release, config)),
         "artwork_url": _image_url(release, config),
         "tracks": [
@@ -149,9 +283,11 @@ def _release_sync_signature(release, config):
 
 def build_release_plan(
     release, spotify, discogs, state, config, playlists_by_release,
-    report, dry_run=True, unmanaged_names=None,
+    report, dry_run=True, unmanaged_names=None, target_playlist_name=None,
 ):
-    target_playlist_name = playlist_name(release, config)
+    target_playlist_name = target_playlist_name or playlist_name(
+        release, config.get("SPOTIFY_PLAYLIST_ROOT")
+    )
     description = generate_description(release, config)
     description_hash = stable_hash(description)
     stored = state.get_release(release.release_id)
@@ -206,9 +342,13 @@ def build_release_plan(
         current_tracks = spotify.playlist_tracks(playlist_id)
     current_uris = [track["uri"] for track in current_tracks if track.get("uri")]
     previous_tracks = state.tracks(release.release_id)
-    matches, desired_uris, duplicate_tracks, cache_signatures = _resolve_tracks(
-        release, spotify, previous_tracks, config, state, dry_run, report
-    )
+    (
+        matches,
+        desired_uris,
+        duplicate_tracks,
+        cache_signatures,
+        match_status,
+    ) = _resolve_tracks(release, spotify, previous_tracks, config, state, dry_run, report)
     has_unresolved = any(match.status != "MATCHED" for match in matches)
     unresolved_without_mapping = any(
         match.status != "MATCHED"
@@ -226,6 +366,25 @@ def build_release_plan(
     name_status = "CREATED" if not playlist_id else (
         "UPDATED" if playlist.get("name") != target_playlist_name else "UNCHANGED"
     )
+    if match_status in ("NO MATCH", "AMBIGUOUS MATCH"):
+        return ReleasePlan(
+            release=release,
+            playlist_name=target_playlist_name,
+            playlist_id=playlist_id,
+            playlist_action=(
+                "AMBIGUOUS" if match_status == "AMBIGUOUS MATCH" else "NO_MATCH"
+            ),
+            tracks=release.tracks,
+            matches=matches,
+            desired_uris=desired_uris,
+            current_uris=current_uris,
+            description=description,
+            description_hash=description_hash,
+            name_status=name_status,
+            match_status=match_status,
+            duplicate_track_matches=duplicate_tracks,
+            cache_signatures=cache_signatures,
+        )
     description_status = "UNCHANGED"
     if not playlist_id:
         description_status = "CREATED"
@@ -286,10 +445,33 @@ def build_release_plan(
         artwork_jpeg=artwork_jpeg,
         cover_status=cover_status,
         name_status=name_status,
+        match_status=match_status,
         description_status=description_status,
         duplicate_track_matches=duplicate_tracks,
         cache_signatures=cache_signatures,
     )
+
+
+def _record_track_results(report, plan, config):
+    report.duplicate_tracks += plan.duplicate_track_matches
+    for track, match in zip(plan.tracks, plan.matches):
+        if match.status == "MATCHED":
+            report.tracks_matched += 1
+        elif match.status == "MISSING":
+            report.tracks_missing += 1
+            if config["MISSING_TRACK_ACTION"] == "report":
+                report.warnings.append(
+                    "MISSING ON SPOTIFY | Discogs release: {} | Artist: {} | Track: {} | Reason: {}".format(
+                        plan.release.release_id,
+                        track.artist,
+                        track.title,
+                        match.reason,
+                    )
+                )
+        elif match.status == "AMBIGUOUS":
+            report.tracks_ambiguous += 1
+        elif match.status == "REJECTED":
+            report.tracks_rejected += 1
 
 
 def discover_managed_playlists(spotify, state, verbose=False):
@@ -463,8 +645,13 @@ def synchronize(
     starting_requests = getattr(transport, "request_count", 0)
     starting_429s = getattr(transport, "rate_limit_count", 0)
     report.releases_skipped = max(0, len(all_release_ids) - len(releases))
+    target_names = playlist_names(
+        releases, config.get("SPOTIFY_PLAYLIST_ROOT")
+    )
     signatures = {
-        release.release_id: _release_sync_signature(release, config)
+        release.release_id: _release_sync_signature(
+            release, config, target_names[release.release_id]
+        )
         for release in releases
     }
     completed_ids = {
@@ -576,6 +763,7 @@ def synchronize(
                         report,
                         dry_run,
                         unmanaged_names,
+                        target_names[release.release_id],
                     )
                     report.plans.append(plan)
                     if plan.playlist_action == "COLLISION":
@@ -597,6 +785,22 @@ def synchronize(
                                 release.release_id,
                                 ", ".join(plan.duplicate_playlist_ids),
                             )
+                        )
+                        continue
+                    _record_track_results(report, plan, config)
+                    if plan.match_status in ("NO MATCH", "AMBIGUOUS MATCH"):
+                        report.releases_skipped += 1
+                        report.skipped_operations += 1
+                        report.warnings.append(
+                            "{} | Discogs release {} was left pending; no Spotify playlist was created or changed.".format(
+                                plan.match_status,
+                                release.release_id,
+                            )
+                        )
+                        LOGGER.warning(
+                            "%s for Discogs release %s; leaving it pending without playlist writes",
+                            plan.match_status,
+                            release.release_id,
                         )
                         continue
                     _apply_plan(
@@ -622,25 +826,6 @@ def synchronize(
                         report.playlists_updated += 1
                     else:
                         report.playlists_unchanged += 1
-                    report.duplicate_tracks += plan.duplicate_track_matches
-                    for track, match in zip(plan.tracks, plan.matches):
-                        if match.status == "MATCHED":
-                            report.tracks_matched += 1
-                        elif match.status == "MISSING":
-                            report.tracks_missing += 1
-                            if config["MISSING_TRACK_ACTION"] == "report":
-                                report.warnings.append(
-                                    "MISSING ON SPOTIFY | Discogs release: {} | Artist: {} | Track: {} | Reason: {}".format(
-                                        release.release_id,
-                                        track.artist,
-                                        track.title,
-                                        match.reason,
-                                    )
-                                )
-                        elif match.status == "AMBIGUOUS":
-                            report.tracks_ambiguous += 1
-                        elif match.status == "REJECTED":
-                            report.tracks_rejected += 1
                     if verbose:
                         LOGGER.info(
                             "%s | %s | %s | NAME %s | COVER %s | DESCRIPTION %s",

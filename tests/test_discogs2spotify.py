@@ -23,15 +23,22 @@ from discogs2spotify.config import apply_overrides, filter_releases, load_config
 from discogs2spotify.database import StateStore
 from discogs2spotify.discogs import DiscogsClient, release_from_api
 from discogs2spotify.errors import APIError, SpotifyRateLimitError, SyncError
-from discogs2spotify.matching import match_track, normalize_text
+from discogs2spotify.matching import (
+    album_candidate_from_spotify,
+    match_track,
+    normalize_text,
+    score_album_candidate,
+)
 from discogs2spotify import main as main_module
 from discogs2spotify.metadata import (
     discogs_marker,
     generate_description,
     playlist_name,
+    playlist_names,
     stable_hash,
 )
 from discogs2spotify.models import (
+    AlbumCandidate,
     DiscogsRelease,
     DiscogsTrack,
     SyncReport,
@@ -146,12 +153,23 @@ class FakeDiscogs:
 
 
 class FakeSpotify:
-    def __init__(self, search_results=None, playlists=None):
+    def __init__(
+        self,
+        search_results=None,
+        playlists=None,
+        album_results=None,
+        album_track_results=None,
+    ):
         self.search_results = search_results or {}
         self.playlists = playlists or {}
+        self.album_results = album_results or {}
+        self.album_track_results = album_track_results or {}
         self.writes = []
         self.created = 0
         self.search_calls = []
+        self.album_search_calls = []
+        self.album_track_calls = []
+        self.call_order = []
 
     def list_playlists(self):
         return list(self.playlists.values())
@@ -164,7 +182,18 @@ class FakeSpotify:
 
     def search_tracks(self, track):
         self.search_calls.append(track.title)
+        self.call_order.append("track search")
         return list(self.search_results.get(track.title, []))
+
+    def search_albums(self, release):
+        self.album_search_calls.append(release.title)
+        self.call_order.append("album search")
+        return list(self.album_results.get(release.title, []))
+
+    def album_tracks(self, album):
+        self.album_track_calls.append(album.spotify_id)
+        self.call_order.append("album tracks")
+        return list(self.album_track_results.get(album.spotify_id, []))
 
     def create_playlist(self, name, description, public=False):
         self.created += 1
@@ -400,27 +429,67 @@ class MatchingTests(unittest.TestCase):
         result = match_track(self.track, [], threshold=90)
         self.assertEqual(result.status, "MISSING")
 
+    def test_album_matching_does_not_require_country_or_exact_year(self):
+        release = sample_release()
+        release.country = ""
+        release.year = 1970
+        album = AlbumCandidate(
+            "album-1", "The Real Folk Blues", "John Lee Hooker", 1965
+        )
+        score, reason = score_album_candidate(release, album)
+        self.assertFalse(reason)
+        self.assertGreaterEqual(score, 99.0)
+
+    def test_album_candidate_parser_accepts_original_release_year(self):
+        album = album_candidate_from_spotify({
+            "id": "album-1",
+            "name": "The Real Folk Blues",
+            "album_type": "album",
+            "release_date": "1965-01-01",
+            "total_tracks": 12,
+            "artists": [{"name": "John Lee Hooker"}],
+        })
+        self.assertEqual(album.year, 1965)
+        self.assertEqual(album.artist, "John Lee Hooker")
+        self.assertEqual(album.total_tracks, 12)
+
     def test_playlist_name_uses_available_fields_and_is_limited(self):
         release = sample_release()
         self.assertEqual(
             playlist_name(release),
-            "John Lee Hooker_The Real Folk Blues_France_1980",
+            "John Lee Hooker_The Real Folk Blues",
         )
+        self.assertNotIn("France", playlist_name(release))
+        self.assertNotIn("1980", playlist_name(release))
         release.artist = ""
-        release.country = ""
-        release.year = None
         release.title = "A" * 150
         self.assertLessEqual(len(playlist_name(release)), 100)
 
-    def test_playlist_name_uses_root_and_discogs_folder_as_path_prefix(self):
-        name = playlist_name(
-            sample_release(),
-            {"SPOTIFY_PLAYLIST_ROOT": "Vinyl collection"},
-        )
+    def test_playlist_name_prefixes_root_without_folder(self):
+        release = sample_release()
+        release.folder_name = "Soundtrack"
+        name = playlist_name(release, "Vinyl collection")
         self.assertEqual(
             name,
-            "Vinyl collection/Blues/John Lee Hooker_The Real Folk Blues_France_1980",
+            "Vinyl collection-John Lee Hooker_The Real Folk Blues",
         )
+        self.assertNotIn(release.folder_name, name)
+
+    def test_duplicate_playlist_names_are_enumerated_deterministically(self):
+        first = sample_release("10")
+        second = sample_release("2")
+        third = sample_release("3")
+        expected = {
+            "2": "John Lee Hooker_The Real Folk Blues",
+            "3": "John Lee Hooker_The Real Folk Blues (2)",
+            "10": "John Lee Hooker_The Real Folk Blues (3)",
+        }
+        expected = {
+            release_id: "Vinyl collection-" + name
+            for release_id, name in expected.items()
+        }
+        self.assertEqual(playlist_names([first, second, third], "Vinyl collection"), expected)
+        self.assertEqual(playlist_names([third, first, second], "Vinyl collection"), expected)
 
     def test_description_includes_available_edition_metadata_and_is_hashed(self):
         release = sample_release()
@@ -430,6 +499,7 @@ class MatchingTests(unittest.TestCase):
         self.assertIn("France · 1980", description)
         self.assertIn("LP · Album, Reissue", description)
         self.assertIn("Discogs release: 3812903", description)
+        self.assertIn("Discogs folder: Blues", description)
         self.assertIn("https://www.discogs.com/release/3812903", description)
         self.assertLessEqual(len(description), 300)
         self.assertEqual(stable_hash(description), stable_hash(description))
@@ -586,6 +656,60 @@ class SpotifySearchTests(unittest.TestCase):
         client.create_playlist("My playlist", "Description", public="false")
         self.assertFalse(transport.payload["public"])
 
+    def test_album_search_and_tracklist_use_spotify_album_endpoints(self):
+        class FakeTransport:
+            def __init__(self):
+                self.requests = []
+                self.responses = [
+                    json.dumps({
+                        "albums": {
+                            "items": [{
+                                "id": "album-1",
+                                "name": "The Real Folk Blues",
+                                "album_type": "album",
+                                "release_date": "1965",
+                                "total_tracks": 2,
+                                "artists": [{"name": "John Lee Hooker"}],
+                            }]
+                        }
+                    }).encode("utf-8"),
+                    json.dumps({
+                        "items": [{
+                            "id": "track-1",
+                            "uri": "spotify:track:track-1",
+                            "name": "The Waterfront",
+                            "artists": [{"name": "John Lee Hooker"}],
+                        }],
+                        "next": "next-page",
+                    }).encode("utf-8"),
+                    b'{"items":[],"next":null}',
+                ]
+
+            def request(self, service, url, method="GET", headers=None, data=None):
+                self.requests.append((method, url))
+                return self.responses.pop(0)
+
+        class FakeTokenManager:
+            def access_token(self):
+                return "fake"
+
+        transport = FakeTransport()
+        client = SpotifyClient(FakeTokenManager(), transport=transport)
+        release = sample_release()
+        albums = client.search_albums(release)
+        tracks = client.album_tracks(albums[0])
+        parsed_query = parse_qs(urlparse(transport.requests[0][1]).query)
+        self.assertEqual(parsed_query["type"], ["album"])
+        self.assertEqual(
+            parsed_query["q"], ["John Lee Hooker The Real Folk Blues"]
+        )
+        self.assertEqual(
+            [urlparse(url).path for _, url in transport.requests[1:]],
+            ["/v1/albums/album-1/tracks", "/v1/albums/album-1/tracks"],
+        )
+        self.assertEqual(tracks[0].uri, "spotify:track:track-1")
+        self.assertEqual(tracks[0].album, "The Real Folk Blues")
+
     def test_update_playlist_can_rename_and_update_description_together(self):
         class FakeTransport:
             request_data = None
@@ -624,8 +748,182 @@ class StateAndSyncTests(unittest.TestCase):
     def _state(self, directory, readonly=False):
         return StateStore(Path(directory) / "state.db", readonly=readonly)
 
-    def test_existing_managed_playlist_is_renamed_to_root_and_folder_path(self):
-        release = sample_release(tracks=[])
+    def test_album_first_uses_local_tracklist_before_track_search(self):
+        release = sample_release()
+        release.year = 1970
+        release.country = ""
+        release.raw["images"] = []
+        album = AlbumCandidate(
+            "album-1", "The Real Folk Blues", "John Lee Hooker", 1965, 1
+        )
+        spotify = FakeSpotify(
+            album_results={release.title: [album]},
+            album_track_results={
+                "album-1": [
+                    candidate(
+                        spotify_id="album-track-1",
+                        album="The Real Folk Blues",
+                        year=1965,
+                    )
+                ]
+            },
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(directory, readonly=True)
+            report = synchronize(
+                [release], [release.release_id], spotify, FakeDiscogs(),
+                state, app_config(), dry_run=True,
+            )
+            state.close()
+        self.assertEqual(spotify.call_order, ["album search", "album tracks"])
+        self.assertEqual(report.tracks_searched, 0)
+        self.assertEqual(report.tracks_matched, 1)
+        self.assertEqual(report.plans[0].match_status, "FULL MATCH")
+        self.assertEqual(
+            report.plans[0].desired_uris, ["spotify:track:album-track-1"]
+        )
+
+    def test_weak_album_candidate_falls_back_to_track_search(self):
+        release = sample_release()
+        release.raw["images"] = []
+        weak_album = AlbumCandidate("weak-album", "Greatest Hits", "Another Artist")
+        spotify = FakeSpotify(
+            search_results={"The Waterfront": [candidate()]},
+            album_results={release.title: [weak_album]},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(directory, readonly=True)
+            report = synchronize(
+                [release], [release.release_id], spotify, FakeDiscogs(),
+                state, app_config(), dry_run=True,
+            )
+            state.close()
+        self.assertEqual(spotify.call_order, ["album search", "track search"])
+        self.assertEqual(report.tracks_matched, 1)
+        self.assertEqual(report.plans[0].match_status, "FULL MATCH")
+
+    def test_ambiguous_albums_fall_back_without_choosing_an_album(self):
+        release = sample_release()
+        release.raw["images"] = []
+        albums = [
+            AlbumCandidate("album-a", release.title, release.artist, 1970, 1),
+            AlbumCandidate("album-b", release.title, release.artist, 1970, 1),
+        ]
+        album_tracks = {
+            album.spotify_id: [
+                candidate(
+                    spotify_id="track-" + album.spotify_id,
+                    album=release.title,
+                )
+            ]
+            for album in albums
+        }
+        spotify = FakeSpotify(
+            search_results={
+                "The Waterfront": [
+                    candidate(spotify_id="track-a"),
+                    candidate(spotify_id="track-b"),
+                ]
+            },
+            album_results={release.title: albums},
+            album_track_results=album_tracks,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(directory, readonly=True)
+            report = synchronize(
+                [release], [release.release_id], spotify, FakeDiscogs(),
+                state, app_config(), dry_run=True,
+            )
+            state.close()
+        self.assertEqual(spotify.album_track_calls, ["album-a", "album-b"])
+        self.assertEqual(spotify.search_calls, ["The Waterfront"])
+        self.assertEqual(report.plans[0].match_status, "AMBIGUOUS MATCH")
+        self.assertEqual(report.plans[0].playlist_action, "AMBIGUOUS")
+        self.assertEqual(spotify.created, 0)
+        self.assertEqual(report.releases_pending, 1)
+
+    def test_confident_partial_album_match_creates_playlist_with_matched_tracks(self):
+        release = sample_release(
+            "partial-1",
+            [
+                DiscogsTrack(
+                    "partial-1", "A1", 0, "Known Song", "John Lee Hooker",
+                    "The Real Folk Blues", 1970,
+                ),
+                DiscogsTrack(
+                    "partial-1", "A2", 1, "Unavailable One", "John Lee Hooker",
+                    "The Real Folk Blues", 1970,
+                ),
+                DiscogsTrack(
+                    "partial-1", "A3", 2, "Unavailable Two", "John Lee Hooker",
+                    "The Real Folk Blues", 1970,
+                ),
+            ],
+        )
+        release.raw["images"] = []
+        album = AlbumCandidate(
+            "partial-album", release.title, release.artist, 1965, 3
+        )
+        spotify = FakeSpotify(
+            album_results={release.title: [album]},
+            album_track_results={
+                "partial-album": [
+                    candidate(
+                        spotify_id="known-track",
+                        title="Known Song",
+                        album=release.title,
+                        year=1965,
+                    )
+                ]
+            },
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(directory)
+            report = synchronize(
+                [release], [release.release_id], spotify, FakeDiscogs(),
+                state, app_config(), dry_run=False,
+            )
+            state.close()
+        self.assertEqual(report.plans[0].match_status, "PARTIAL MATCH")
+        self.assertEqual(report.playlists_created, 1)
+        self.assertEqual(
+            spotify.playlists["created-1"]["_tracks"],
+            [{"uri": "spotify:track:known-track"}],
+        )
+
+    def test_duplicate_playlist_names_keep_distinct_release_id_mappings(self):
+        first = sample_release("10")
+        second = sample_release("2")
+        first.raw["images"] = []
+        second.raw["images"] = []
+        spotify = FakeSpotify({"The Waterfront": [candidate()]})
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(directory)
+            report = synchronize(
+                [first, second],
+                ["10", "2"],
+                spotify,
+                FakeDiscogs(),
+                state,
+                app_config(),
+                dry_run=False,
+            )
+            first_record = state.get_release("10")
+            second_record = state.get_release("2")
+            state.close()
+        self.assertEqual(report.playlists_created, 2)
+        self.assertEqual(
+            first_record["playlist_name"],
+            "My_record_collection-John Lee Hooker_The Real Folk Blues (2)",
+        )
+        self.assertEqual(
+            second_record["playlist_name"],
+            "My_record_collection-John Lee Hooker_The Real Folk Blues",
+        )
+        self.assertNotEqual(first_record["playlist_id"], second_record["playlist_id"])
+
+    def test_existing_managed_playlist_is_renamed_with_root_prefix(self):
+        release = sample_release()
         release.raw["images"] = []
         playlist = {
             "id": "managed-1",
@@ -634,7 +932,10 @@ class StateAndSyncTests(unittest.TestCase):
             "images": [],
             "_tracks": [],
         }
-        spotify = FakeSpotify(playlists={"managed-1": playlist})
+        spotify = FakeSpotify(
+            {"The Waterfront": [candidate()]},
+            playlists={"managed-1": playlist},
+        )
         config = app_config()
         config["SPOTIFY_PLAYLIST_ROOT"] = "Vinyl collection"
         config["PLAYLIST_DESCRIPTION"] = False
@@ -652,7 +953,7 @@ class StateAndSyncTests(unittest.TestCase):
             state.close()
         self.assertEqual(
             playlist["name"],
-            "Vinyl collection/Blues/John Lee Hooker_The Real Folk Blues_France_1980",
+            "Vinyl collection-John Lee Hooker_The Real Folk Blues",
         )
         self.assertEqual(report.playlists_updated, 1)
         self.assertEqual(report.plans[0].name_status, "UPDATED")
@@ -745,19 +1046,25 @@ class StateAndSyncTests(unittest.TestCase):
         self.assertEqual(plan.desired_uris, ["spotify:track:spotify-1"] * 2)
         self.assertEqual(report.duplicate_tracks, 1)
 
-    def test_missing_tracks_do_not_abort_release(self):
+    def test_release_with_no_matched_tracks_does_not_create_empty_playlist(self):
         release = sample_release()
         spotify = FakeSpotify({"The Waterfront": []})
         discogs = FakeDiscogs()
         with tempfile.TemporaryDirectory() as directory:
-            state = self._state(directory, readonly=True)
+            state = self._state(directory)
             report = synchronize(
-                [release], ["3812903"], spotify, discogs, state, app_config(), dry_run=True
+                [release], ["3812903"], spotify, discogs, state, app_config(), dry_run=False
             )
             state.close()
-        self.assertEqual(report.releases_processed, 1)
+        self.assertEqual(report.releases_processed, 0)
+        self.assertEqual(report.releases_pending, 1)
+        self.assertEqual(report.releases_skipped, 1)
         self.assertEqual(report.tracks_missing, 1)
-        self.assertIn("MISSING ON SPOTIFY", report.warnings[0])
+        self.assertEqual(report.playlists_created, 0)
+        self.assertEqual(spotify.created, 0)
+        self.assertEqual(spotify.writes, [])
+        self.assertEqual(report.plans[0].match_status, "NO MATCH")
+        self.assertTrue(any("no Spotify playlist was created" in item for item in report.warnings))
 
     def test_dry_run_has_no_spotify_or_disk_writes(self):
         release = sample_release()
@@ -948,6 +1255,7 @@ class StateAndSyncTests(unittest.TestCase):
         self.assertEqual(report.tracks_matched, 1)
         self.assertEqual(report.tracks_resolved_from_cache, 1)
         self.assertEqual(spotify.search_calls, ["The Waterfront"])
+        self.assertEqual(spotify.album_search_calls, ["The Real Folk Blues"])
         self.assertEqual(spotify.writes, previous_writes)
         self.assertEqual(
             spotify.playlists["created-1"]["_tracks"],
@@ -1463,7 +1771,7 @@ class StateAndSyncTests(unittest.TestCase):
 
     def test_unmanaged_same_name_playlist_is_not_modified_or_duplicated(self):
         release = sample_release()
-        name = playlist_name(release, app_config())
+        name = playlist_name(release)
         spotify = FakeSpotify(
             playlists={
                 "unmanaged": {

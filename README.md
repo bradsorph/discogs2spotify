@@ -11,10 +11,10 @@ The tool creates one playlist per unique Discogs release. It uses exact release
 IDs internally, the Discogs tracklist as the playlist order, and release-specific
 artwork and edition metadata. It does not create physical playlist folders:
 Spotify's Web API cannot manage playlist folders. Discogs folder associations
-are retained in SQLite and folder names appear in reports. Playlist names use
-the logical path `SPOTIFY_PLAYLIST_ROOT/Discogs folder/Release`, so the root and
-folder are visible in Spotify's playlist list but are not actual directories.
-Managed playlists are renamed to this path on their next synchronization.
+are retained in SQLite and included in playlist descriptions. Playlist names
+are `[SPOTIFY_PLAYLIST_ROOT]-[Artist]_[Title]`; duplicate names receive
+deterministic numeric suffixes. Managed playlists are renamed to this convention
+on their next synchronization.
 
 ## Install
 
@@ -152,8 +152,10 @@ existing playlist cover is left untouched.
 
 ## Synchronization behavior and safety
 
-- Matching scores artist, title, album and year, rejects incompatible versions,
-  applies `MATCH_THRESHOLD`, and reports near-ties as ambiguous by default.
+- Matching first searches albums by artist and title, then uses album tracklist
+  overlap and the existing conservative track matcher. Uncertain album results
+  fall back to individual track searches; year is only a weak signal and
+  country is not used to identify a Spotify album.
 - Missing, ambiguous and rejected tracks are reported; a release can still
   synchronize successfully matched tracks. Unmapped current playlist entries
   are preserved rather than removed when a match failure makes their identity

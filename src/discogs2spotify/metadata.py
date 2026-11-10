@@ -15,35 +15,46 @@ def _safe_component(value):
     return re.sub(r"[/\\\x00-\x1f]", " ", clean(value)).strip(" ._")
 
 
-def playlist_name(release, settings=None):
-    release_parts = [
-        release.artist,
-        release.title,
-        release.country,
-        str(release.year) if release.year else "",
-    ]
-    release_parts = [_safe_component(part) for part in release_parts]
-    release_suffix = "_".join(part for part in release_parts if part)
-    prefix_parts = []
-    if settings:
-        root = _safe_component(settings.get("SPOTIFY_PLAYLIST_ROOT", ""))
-        folder = _safe_component(release.folder_name)
-        prefix_parts = [part for part in (root, folder) if part]
-    prefix = "/".join(prefix_parts)
-    name = "/".join(part for part in (prefix, release_suffix) if part)
+def playlist_name(release, root=None):
+    parts = [_safe_component(release.artist), _safe_component(release.title)]
+    name = "_".join(part for part in parts if part)
     if not name:
         name = "Discogs release {}".format(release.release_id)
+    safe_root = _safe_component(root)
+    if safe_root:
+        name = safe_root + "-" + name
     if len(name) > 100:
-        if prefix and release_suffix:
-            available = 100 - len(prefix) - 1
-            if available > 3:
-                suffix = release_suffix[:available - 3].rstrip(" _.-") + "..."
-                name = prefix + "/" + suffix
-            else:
-                name = prefix[:97].rstrip(" /._-") + "..."
-        else:
-            name = name[:97].rstrip(" _.-") + "..."
+        name = name[:97].rstrip(" _.-") + "..."
     return name
+
+
+def playlist_names(releases, root=None):
+    names = {}
+    grouped = {}
+    used_names = set()
+    for release in releases:
+        grouped.setdefault(playlist_name(release, root).casefold(), []).append(release)
+    for group_key in sorted(grouped):
+        group = grouped[group_key]
+        group.sort(
+            key=lambda release: (
+                0 if str(release.release_id).isdigit() else 1,
+                int(release.release_id)
+                if str(release.release_id).isdigit()
+                else str(release.release_id).casefold(),
+            )
+        )
+        base_name = playlist_name(group[0], root)
+        for index, release in enumerate(group, 1):
+            suffix_index = max(index, 2)
+            name = base_name if index == 1 else ""
+            while not name or name.casefold() in used_names:
+                suffix = " ({})".format(suffix_index)
+                name = base_name[:100 - len(suffix)].rstrip(" _.-") + suffix
+                suffix_index += 1
+            names[release.release_id] = name
+            used_names.add(name.casefold())
+    return names
 
 
 def _truncate_utf8(value, limit):
@@ -74,6 +85,9 @@ def generate_description(release, settings):
                 part for part in (country, str(release.year or "")) if part
             )
         )
+    folder_name = clean(release.folder_name)
+    if folder_name:
+        lines.append("Discogs folder: " + folder_name)
     if settings.get("DESCRIPTION_INCLUDE_FORMAT", True):
         for item in release.raw.get("formats") or []:
             name = clean(item.get("name"))
