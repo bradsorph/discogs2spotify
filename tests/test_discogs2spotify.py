@@ -48,7 +48,7 @@ from discogs2spotify.oauth import BASE_SCOPES, SpotifyTokenManager
 from discogs2spotify.process_lock import SyncProcessLock
 from discogs2spotify.reporting import print_report
 from discogs2spotify.spotify import SpotifyClient
-from discogs2spotify.sync import synchronize
+from discogs2spotify.sync import _release_sync_signature, synchronize
 
 
 def png_bytes():
@@ -749,6 +749,144 @@ class SpotifySearchTests(unittest.TestCase):
 class StateAndSyncTests(unittest.TestCase):
     def _state(self, directory, readonly=False):
         return StateStore(Path(directory) / "state.db", readonly=readonly)
+
+    def test_discogs_metadata_limit_stops_after_pending_release(self):
+        records = [
+            {
+                "release_id": str(release_id),
+                "folder_id": "3",
+                "folder_name": "Blues",
+                "basic_information": {
+                    "id": release_id,
+                    "title": "Album {}".format(release_id),
+                    "artists": [{"name": "Artist {}".format(release_id)}],
+                    "year": 1970,
+                },
+            }
+            for release_id in range(1, 4)
+        ]
+
+        class CountingDiscogs:
+            def __init__(self):
+                self.requested = []
+
+            def get_release(self, release_id):
+                self.requested.append(str(release_id))
+                return {"title": "Album {}".format(release_id), "tracklist": []}
+
+        discogs = CountingDiscogs()
+        config = app_config()
+        target_names = playlist_names(
+            [release_from_api(record, {}) for record in records],
+            config["SPOTIFY_PLAYLIST_ROOT"],
+        )
+        report = SyncReport()
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(directory)
+            releases, limit_reached = main_module._load_releases(
+                discogs,
+                records,
+                report,
+                state,
+                config,
+                target_names,
+                max_releases=1,
+            )
+            state.close()
+
+        self.assertEqual(discogs.requested, ["1"])
+        self.assertEqual([release.release_id for release in releases], ["1"])
+        self.assertTrue(limit_reached)
+
+    def test_discogs_metadata_limit_continues_past_completed_releases(self):
+        records = [
+            {
+                "release_id": str(release_id),
+                "folder_id": "3",
+                "folder_name": "Blues",
+                "basic_information": {
+                    "id": release_id,
+                    "title": "Album {}".format(release_id),
+                    "artists": [{"name": "Artist {}".format(release_id)}],
+                    "year": 1970,
+                },
+            }
+            for release_id in range(1, 4)
+        ]
+        details = {
+            "title": "Album 1",
+            "artists": [{"name": "Artist 1"}],
+            "year": 1970,
+            "tracklist": [],
+        }
+
+        class CountingDiscogs:
+            def __init__(self):
+                self.requested = []
+
+            def get_release(self, release_id):
+                self.requested.append(str(release_id))
+                return {
+                    "title": "Album {}".format(release_id),
+                    "artists": [{"name": "Artist {}".format(release_id)}],
+                    "year": 1970,
+                    "tracklist": [],
+                }
+
+        discogs = CountingDiscogs()
+        config = app_config()
+        basic_releases = [release_from_api(record, {}) for record in records]
+        target_names = playlist_names(
+            basic_releases, config["SPOTIFY_PLAYLIST_ROOT"]
+        )
+        first_release = release_from_api(records[0], details)
+        signature = _release_sync_signature(
+            first_release, config, target_names[first_release.release_id]
+        )
+        report = SyncReport()
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(directory)
+            state.record_release(
+                "1", "3", "Blues", "spotify-playlist-1", target_names["1"]
+            )
+            state.complete_release("1", signature)
+            releases, limit_reached = main_module._load_releases(
+                discogs,
+                records,
+                report,
+                state,
+                config,
+                target_names,
+                max_releases=1,
+            )
+            state.close()
+
+        self.assertEqual(discogs.requested, ["1", "2"])
+        self.assertEqual([release.release_id for release in releases], ["1", "2"])
+        self.assertTrue(limit_reached)
+
+    def test_metadata_limited_sync_reports_unloaded_releases_as_pending(self):
+        release = sample_release()
+        spotify = FakeSpotify({"The Waterfront": [candidate()]})
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(directory)
+            report = synchronize(
+                [release],
+                ["3812903", "2", "3"],
+                spotify,
+                FakeDiscogs(),
+                state,
+                app_config(),
+                dry_run=False,
+                selected_release_count=3,
+                metadata_limit_reached=True,
+            )
+            state.close()
+
+        self.assertEqual(report.releases_processed, 1)
+        self.assertEqual(report.releases_completed, 1)
+        self.assertEqual(report.releases_pending, 2)
+        self.assertTrue(report.limit_reached)
 
     def test_album_first_uses_local_tracklist_before_track_search(self):
         release = sample_release()

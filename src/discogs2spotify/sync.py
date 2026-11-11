@@ -658,18 +658,27 @@ def synchronize(
     dry_run=True,
     verbose=False,
     max_releases=None,
+    selected_release_count=None,
+    target_names=None,
+    metadata_limit_reached=False,
 ):
+    selected_count = (
+        len(releases)
+        if selected_release_count is None
+        else selected_release_count
+    )
     report = SyncReport(
         releases_total=len(all_release_ids),
-        releases_selected=len(releases),
+        releases_selected=selected_count,
     )
     transport = getattr(spotify, "transport", None)
     starting_requests = getattr(transport, "request_count", 0)
     starting_429s = getattr(transport, "rate_limit_count", 0)
-    report.releases_skipped = max(0, len(all_release_ids) - len(releases))
-    target_names = playlist_names(
-        releases, config.get("SPOTIFY_PLAYLIST_ROOT")
-    )
+    report.releases_skipped = max(0, len(all_release_ids) - selected_count)
+    if target_names is None:
+        target_names = playlist_names(
+            releases, config.get("SPOTIFY_PLAYLIST_ROOT")
+        )
     signatures = {
         release.release_id: _release_sync_signature(
             release, config, target_names[release.release_id]
@@ -684,7 +693,7 @@ def synchronize(
         )
     }
     report.releases_completed = len(completed_ids)
-    report.releases_pending = max(0, len(releases) - len(completed_ids))
+    report.releases_pending = max(0, selected_count - len(completed_ids))
     pending_releases = [
         release for release in releases if release.release_id not in completed_ids
     ]
@@ -706,7 +715,7 @@ def synchronize(
                 "INTERRUPTED",
                 reason="User interrupted synchronization",
                 completed_releases=len(completed_ids),
-                pending_releases=max(0, len(releases) - len(completed_ids)),
+                pending_releases=max(0, selected_count - len(completed_ids)),
             )
         raise
     except APIError as error:
@@ -764,7 +773,7 @@ def synchronize(
                         "RUNNING",
                         current_release_id=release.release_id,
                         completed_releases=len(completed_ids),
-                        pending_releases=max(0, len(releases) - len(completed_ids)),
+                        pending_releases=max(0, selected_count - len(completed_ids)),
                     )
                 if index == 1 or index % 10 == 0 or index == total:
                     LOGGER.info(
@@ -839,7 +848,7 @@ def synchronize(
                         state.update_sync_progress(
                             "RUNNING",
                             completed_releases=len(completed_ids),
-                            pending_releases=max(0, len(releases) - len(completed_ids)),
+                            pending_releases=max(0, selected_count - len(completed_ids)),
                         )
                     report.releases_processed += 1
                     if plan.playlist_action == "CREATE":
@@ -874,7 +883,7 @@ def synchronize(
                             state,
                             dry_run,
                             len(completed_ids),
-                            max(0, len(releases) - len(completed_ids)),
+                            max(0, selected_count - len(completed_ids)),
                             release.release_id,
                         )
                         break
@@ -886,7 +895,7 @@ def synchronize(
                             reason=str(error),
                             current_release_id=release.release_id,
                             completed_releases=len(completed_ids),
-                            pending_releases=max(0, len(releases) - len(completed_ids)),
+                            pending_releases=max(0, selected_count - len(completed_ids)),
                         )
                     report.warnings.append(
                         "API error for Discogs release {}: {}".format(
@@ -903,7 +912,7 @@ def synchronize(
                             reason=str(error),
                             current_release_id=release.release_id,
                             completed_releases=len(completed_ids),
-                            pending_releases=max(0, len(releases) - len(completed_ids)),
+                            pending_releases=max(0, selected_count - len(completed_ids)),
                         )
                     report.warnings.append(
                         "Error for Discogs release {}: {}".format(
@@ -917,14 +926,16 @@ def synchronize(
                     "INTERRUPTED",
                     reason="User interrupted synchronization",
                     completed_releases=len(completed_ids),
-                    pending_releases=max(0, len(releases) - len(completed_ids)),
+                    pending_releases=max(0, selected_count - len(completed_ids)),
                 )
             raise
 
     report.releases_completed = len(completed_ids)
-    report.releases_pending = max(0, len(releases) - len(completed_ids))
+    report.releases_pending = max(0, selected_count - len(completed_ids))
     report.limit_reached = bool(
-        max_releases is not None and report.releases_pending and not report.sync_paused
+        report.releases_pending
+        and not report.sync_paused
+        and (metadata_limit_reached or max_releases is not None)
     )
     report.orphaned = [
         {

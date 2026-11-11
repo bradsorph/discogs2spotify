@@ -11,12 +11,13 @@ from .config import apply_overrides, filter_releases, load_config
 from .database import StateStore
 from .discogs import DiscogsClient, read_discogs_token, release_from_api
 from .errors import APIError, SyncError
+from .metadata import playlist_names
 from .models import SyncReport
 from .oauth import SpotifyTokenManager
 from .process_lock import SyncProcessLock
 from .reporting import print_report
 from .spotify import SpotifyClient
-from .sync import synchronize
+from .sync import _release_sync_signature, synchronize
 
 
 class ColorFormatter(logging.Formatter):
@@ -112,12 +113,31 @@ def _configure_logging(args, configured_level="INFO"):
     logging.getLogger("PIL").setLevel(logging.WARNING)
 
 
-def _load_releases(discogs, collection, report):
+def _load_releases(
+    discogs,
+    collection,
+    report,
+    state,
+    config,
+    target_names,
+    max_releases=None,
+):
     releases = []
     total = len(collection)
     logger = logging.getLogger("discogs2spotify")
-    logger.info("Loading full Discogs release metadata for %d selected releases", total)
+    if max_releases is None:
+        logger.info("Loading full Discogs release metadata for %d selected releases", total)
+    else:
+        logger.info(
+            "Loading full Discogs release metadata for up to %d pending releases",
+            max_releases,
+        )
+    pending_count = 0
+    limit_reached = False
     for index, record in enumerate(collection, 1):
+        if max_releases is not None and pending_count >= max_releases:
+            limit_reached = True
+            break
         if index == 1 or index % 10 == 0 or index == total:
             logger.info("Loading release metadata: %d/%d", index, total)
         logger.debug(
@@ -126,10 +146,17 @@ def _load_releases(discogs, collection, report):
         )
         try:
             details = discogs.get_release(record["release_id"])
-            releases.append(release_from_api(record, details))
+            release = release_from_api(record, details)
+            releases.append(release)
+            signature = _release_sync_signature(
+                release, config, target_names[release.release_id]
+            )
+            if not state.is_release_complete(release.release_id, signature):
+                pending_count += 1
         except APIError as error:
             report.api_errors += 1
             report.releases_skipped += 1
+            pending_count += 1
             report.warnings.append(
                 "API error for Discogs release {}: {}".format(record["release_id"], error)
             )
@@ -138,7 +165,12 @@ def _load_releases(discogs, collection, report):
         "Finished release metadata: %d loaded, %d failed",
         len(releases), report.api_errors,
     )
-    return releases
+    if limit_reached:
+        logger.info(
+            "Discogs metadata loading stopped at --max-releases=%d; remaining selected releases were not fetched",
+            max_releases,
+        )
+    return releases, limit_reached
 
 
 def main(argv=None):
@@ -217,15 +249,29 @@ def main(argv=None):
             config["EXCLUDE_FOLDERS"] or "(none)",
         )
         report_errors = SyncReport()
-        releases = _load_releases(discogs, selected, report_errors)
-
         dry_run = bool(config["DRY_RUN"] or args.report)
         logger.info(
-            "Starting %s synchronization planning; Spotify playlist inventory follows",
+            "Starting %s synchronization planning; loading Discogs release metadata",
             "read-only dry-run" if dry_run else "write-enabled",
         )
         state = StateStore(config["STATE_FILE"], readonly=dry_run)
         try:
+            target_names = playlist_names(
+                [
+                    release_from_api(record, {})
+                    for record in selected
+                ],
+                config.get("SPOTIFY_PLAYLIST_ROOT"),
+            )
+            releases, metadata_limit_reached = _load_releases(
+                discogs,
+                selected,
+                report_errors,
+                state,
+                config,
+                target_names,
+                max_releases=args.max_releases,
+            )
             report = synchronize(
                 releases,
                 [record["release_id"] for record in collection],
@@ -236,12 +282,16 @@ def main(argv=None):
                 dry_run=dry_run,
                 verbose=args.verbose or args.debug,
                 max_releases=args.max_releases,
+                selected_release_count=len(selected),
+                target_names=target_names,
+                metadata_limit_reached=metadata_limit_reached,
             )
         finally:
             state.close()
         report.releases_total = len(collection)
         report.releases_selected = len(selected)
         report.api_errors += report_errors.api_errors
+        report.releases_skipped += report_errors.releases_skipped
         report.warnings = report_errors.warnings + report.warnings
         if duplicates:
             report.warnings.append(

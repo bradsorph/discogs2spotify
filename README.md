@@ -72,6 +72,42 @@ punctuation are passed as one quoted shell argument:
 ./discogs2spotify.sh --sync --exclude For-Sale
 ```
 
+## Optional Discogs utility scripts
+
+The scripts in `utils/` are standalone helpers; they do not participate in the
+Spotify synchronization or change Discogs data.
+
+### Enrich a collection CSV
+
+`utils/discogs-enrich-collection.sh` reads a Discogs collection CSV containing
+a `release_id` column and writes a sibling file named
+`<input>-enriched.csv`. It retains the original columns and fills in additional
+release metadata, including year, country, labels, catalog numbers, format,
+genre, style, master ID, identifiers, matrix/runout, notes, and Discogs URL.
+Missing metadata columns are added to the output, and values are populated
+from each release's API response.
+
+It requires `curl`, `jq`, Python 3, and a Discogs token at
+`~/.config/discogs/token`. It makes one Discogs release API request for each
+non-empty release ID and waits one second between requests. For example:
+
+```bash
+./utils/discogs-enrich-collection.sh ./my-collection.csv
+```
+
+### Inspect individual releases
+
+`utils/discogs-release.sh` fetches one or more Discogs release IDs, saves the
+API response as JSON, and prints a readable text report for each release. It
+requires `curl` and `jq`; if `~/.config/discogs/token` exists, the script uses
+it for authenticated requests. Output is written to a `discogs-releases/`
+directory under the current working directory:
+
+```bash
+./utils/discogs-release.sh 577332
+./utils/discogs-release.sh 577332 9579823 5789680
+```
+
 For a large collection, limit each run to a number of not-yet-completed
 releases, then rerun to continue:
 
@@ -84,6 +120,12 @@ not complete are pending. The batch limit applies after this check, so a failed
 release is retried and completed releases do not use up the batch. A local
 operating-system lock prevents overlapping synchronization processes; it is
 released automatically if the process exits or is terminated.
+
+The collection folder and release-list pages are still read in full so folder
+filters and collection-level reporting remain accurate. Full release details
+are fetched incrementally and stop once the requested number of pending
+releases is found. Completed releases encountered before that point are checked
+but do not count toward the limit.
 
 Spotify can return HTTP 429 responses. Short rate limits are automatically
 retried using Spotify's `Retry-After` value. The synchronizer does not block
