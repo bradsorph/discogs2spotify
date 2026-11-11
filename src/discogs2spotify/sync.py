@@ -292,11 +292,13 @@ def build_release_plan(
     description_hash = stable_hash(description)
     stored = state.get_release(release.release_id)
     if stored:
-        playlist_id = stored["playlist_id"]
         duplicate_ids = playlists_by_release.get(release.release_id, [])
-        if playlist_id not in duplicate_ids:
-            duplicate_ids = [playlist_id] + duplicate_ids
-        playlist_action = "EXIST"
+        stored_playlist_id = str(stored["playlist_id"])
+        if stored_playlist_id in duplicate_ids:
+            playlist_id = stored_playlist_id
+        else:
+            playlist_id = duplicate_ids[0] if len(duplicate_ids) == 1 else None
+        playlist_action = "EXIST" if playlist_id else "CREATE"
     else:
         duplicate_ids = playlists_by_release.get(release.release_id, [])
         playlist_id = duplicate_ids[0] if len(duplicate_ids) == 1 else None
@@ -338,8 +340,21 @@ def build_release_plan(
     playlist = {}
     current_tracks = []
     if playlist_id:
-        playlist = spotify.get_playlist(playlist_id)
-        current_tracks = spotify.playlist_tracks(playlist_id)
+        try:
+            playlist = spotify.get_playlist(playlist_id)
+            current_tracks = spotify.playlist_tracks(playlist_id)
+        except APIError as error:
+            if error.service != "Spotify" or error.status != 404:
+                raise
+            LOGGER.warning(
+                "Managed Spotify playlist %s for Discogs release %s is no longer accessible; a replacement will be created if tracks match",
+                playlist_id,
+                release.release_id,
+            )
+            playlist_id = None
+            playlist_action = "CREATE"
+            playlist = {}
+            current_tracks = []
     current_uris = [track["uri"] for track in current_tracks if track.get("uri")]
     previous_tracks = state.tracks(release.release_id)
     (
@@ -477,10 +492,17 @@ def _record_track_results(report, plan, config):
 def discover_managed_playlists(spotify, state, verbose=False):
     managed = {}
     known_ids = set()
-    for record in state.managed_releases():
-        managed.setdefault(record["release_id"], []).append(record["playlist_id"])
-        known_ids.add(str(record["playlist_id"]))
     playlists = spotify.list_playlists()
+    inventory_ids = {
+        str(playlist["id"])
+        for playlist in playlists
+        if playlist.get("id") is not None
+    }
+    for record in state.managed_releases():
+        playlist_id = str(record["playlist_id"])
+        if playlist_id in inventory_ids:
+            managed.setdefault(record["release_id"], []).append(playlist_id)
+            known_ids.add(playlist_id)
     unmanaged_names = {}
     for playlist in playlists:
         release_id = discogs_marker(playlist.get("description"))

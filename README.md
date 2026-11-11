@@ -162,7 +162,9 @@ existing playlist cover is left untouched.
   uncertain.
 - Playlist IDs are stored by Discogs release ID. If state is missing, playlists
   are recovered only when their description contains the Discogs release marker.
-  Multiple playlists claiming one release are reported and not modified.
+  Multiple playlists claiming one release are reported and not modified. A
+  stored playlist that is absent or returns HTTP 404 is treated as stale and
+  replaced only after at least one track matches.
 - A managed playlist is changed only when its ordered track URIs, generated
   description, or source artwork hash differs. Missing-track records are saved
   for later retries; successful track matches are cached and unresolved tracks

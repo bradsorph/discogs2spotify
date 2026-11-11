@@ -170,11 +170,13 @@ class FakeSpotify:
         self.album_search_calls = []
         self.album_track_calls = []
         self.call_order = []
+        self.get_playlist_calls = []
 
     def list_playlists(self):
         return list(self.playlists.values())
 
     def get_playlist(self, playlist_id):
+        self.get_playlist_calls.append(str(playlist_id))
         return self.playlists[str(playlist_id)]
 
     def playlist_tracks(self, playlist_id):
@@ -957,6 +959,78 @@ class StateAndSyncTests(unittest.TestCase):
         )
         self.assertEqual(report.playlists_updated, 1)
         self.assertEqual(report.plans[0].name_status, "UPDATED")
+
+    def test_missing_saved_playlist_is_recreated_and_state_mapping_replaced(self):
+        release = sample_release()
+        release.raw["images"] = []
+        spotify = FakeSpotify({"The Waterfront": [candidate()]})
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(directory)
+            state.record_release(
+                release.release_id,
+                release.folder_id,
+                release.folder_name,
+                "deleted-playlist-id",
+                "Old playlist name",
+            )
+            report = synchronize(
+                [release],
+                [release.release_id],
+                spotify,
+                FakeDiscogs(),
+                state,
+                app_config(),
+                dry_run=False,
+            )
+            saved = state.get_release(release.release_id)
+            state.close()
+        self.assertEqual(spotify.get_playlist_calls, [])
+        self.assertEqual(report.playlists_created, 1)
+        self.assertEqual(saved["playlist_id"], "created-1")
+        self.assertEqual(spotify.playlists["created-1"]["_tracks"], [
+            {"uri": "spotify:track:spotify-1"}
+        ])
+        self.assertEqual(report.releases_completed, 1)
+
+    def test_playlist_deleted_after_inventory_is_recreated_on_get_404(self):
+        release = sample_release()
+        release.raw["images"] = []
+        stale = {
+            "id": "stale-id",
+            "name": "Old playlist name",
+            "description": "Discogs release: 3812903",
+            "images": [],
+            "_tracks": [],
+        }
+
+        class DeletedAfterInventorySpotify(FakeSpotify):
+            def get_playlist(self, playlist_id):
+                self.get_playlist_calls.append(str(playlist_id))
+                raise APIError(
+                    "Spotify", 404, "/v1/playlists/" + str(playlist_id),
+                    "Resource not found",
+                )
+
+        spotify = DeletedAfterInventorySpotify(
+            {"The Waterfront": [candidate()]},
+            playlists={"stale-id": stale},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(directory)
+            state.record_release(
+                release.release_id, release.folder_id, release.folder_name,
+                "stale-id", stale["name"],
+            )
+            report = synchronize(
+                [release], [release.release_id], spotify, FakeDiscogs(),
+                state, app_config(), dry_run=False,
+            )
+            saved = state.get_release(release.release_id)
+            state.close()
+        self.assertEqual(spotify.get_playlist_calls, ["stale-id"])
+        self.assertEqual(report.playlists_created, 1)
+        self.assertEqual(saved["playlist_id"], "created-1")
+        self.assertEqual(report.releases_completed, 1)
 
     def test_rate_limit_pauses_sync_without_searching_following_tracks(self):
         tracks = [
@@ -1771,7 +1845,9 @@ class StateAndSyncTests(unittest.TestCase):
 
     def test_unmanaged_same_name_playlist_is_not_modified_or_duplicated(self):
         release = sample_release()
-        name = playlist_name(release)
+        name = playlist_name(
+            release, app_config()["SPOTIFY_PLAYLIST_ROOT"]
+        )
         spotify = FakeSpotify(
             playlists={
                 "unmanaged": {
