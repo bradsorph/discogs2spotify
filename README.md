@@ -72,6 +72,20 @@ punctuation are passed as one quoted shell argument:
 ./discogs2spotify.sh --sync --exclude For-Sale
 ```
 
+To synchronize one Discogs release directly, use its numeric release ID. This
+does not list the user's collection and does not apply collection folder
+filters:
+
+```bash
+./discogs2spotify.sh --dry-run --release-id 577332
+./discogs2spotify.sh --sync --release-id 577332
+```
+
+File logging is disabled by default. Set `LOG_TO_FILE=true` in the
+configuration, or pass `--log-file` (and `--no-log-file` to override the
+configuration); logs are also written to `./logs/discogs2spotify.log`. The
+`logs/` directory is ignored by Git.
+
 ## Optional Discogs utility scripts
 
 The scripts in `utils/` are standalone helpers; they do not participate in the
@@ -164,6 +178,32 @@ LOG_LEVEL=INFO
 SPOTIFY_API_DELAY=2.0
 ```
 
+`AMBIGUOUS_MATCH_ACTION` accepts:
+
+- `skip` (default): if the two highest-scoring Spotify track candidates both
+  meet `MATCH_THRESHOLD` and are less than 3 score points apart, mark the
+  track ambiguous instead of choosing one. Other tracks in the release can
+  still be synchronized.
+- `best`: in that same case, choose the highest-scoring candidate. If scores
+  tie, the candidate with the lexicographically smaller Spotify track ID wins.
+
+This setting does not relax `MATCH_THRESHOLD`: a candidate below the threshold
+is not selected by either action. Ambiguous album results fall back to
+individual track searches; this setting controls how ambiguity among those
+track candidates is handled.
+
+`MISSING_TRACK_ACTION` accepts `report` (default) or `skip`. Both leave a
+track without an accepted match out of the generated playlist sequence unless
+a previously saved Spotify mapping can be retained. `report` adds a warning
+for each missing track; `skip` suppresses those per-track warnings. Missing
+tracks are still included in the report's missing-track count.
+
+`DUPLICATE_TRACK_ACTION` accepts `skip` (default) or `allow`. When distinct
+Discogs tracks resolve to the same Spotify track URI, `skip` rejects the later
+match so that URI is not used for both tracks. `allow` keeps both occurrences
+in the playlist. Repeated Discogs entries with the same normalized title and
+artist can still appear more than once.
+
 Spotify's published rate limit uses a rolling 30-second window, but its exact
 request limit varies by app and quota mode and is not published as a fixed
 number. The client spaces Spotify requests at least 2 seconds apart by
@@ -179,6 +219,13 @@ shows startup phases and periodic release counts so a longer run visibly
 progresses. Set `LOG_LEVEL=DEBUG` in the config, pass `--log-level DEBUG`, or
 use `--debug` for per-request and per-track diagnostics. Command-line logging
 options override the config; `--verbose` also enables per-release details.
+
+`LOG_TO_FILE` accepts `true` or `false` and defaults to `false`. When enabled,
+logs are written in addition to the console output to
+`./logs/discogs2spotify.log` (relative to the current working directory); the
+directory is created if needed and the file is appended to. Use `--log-file`
+to enable it for one run or `--no-log-file` to disable it, overriding the
+configuration value.
 
 Description settings can enable/disable playlist descriptions, catalog number,
 format, genre, style, notes, matrix, and Discogs URL. Available Discogs data is

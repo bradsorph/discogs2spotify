@@ -255,6 +255,21 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(overridden["INCLUDE_FOLDERS"], ["Rock"])
         self.assertFalse(overridden["DRY_RUN"])
         self.assertEqual(config["MATCH_THRESHOLD"], 92)
+        self.assertFalse(config["LOG_TO_FILE"])
+
+    def test_file_logging_can_be_enabled_in_config_and_overridden_by_cli(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "discogs2spotify.conf"
+            path.write_text("LOG_TO_FILE=true\n", encoding="utf-8")
+            config = load_config(path)
+        self.assertTrue(config["LOG_TO_FILE"])
+        self.assertIsNone(main_module.build_parser().parse_args([]).log_to_file)
+        self.assertTrue(
+            main_module.build_parser().parse_args(["--log-file"]).log_to_file
+        )
+        self.assertFalse(
+            main_module.build_parser().parse_args(["--no-log-file"]).log_to_file
+        )
 
     def test_log_level_has_info_default_and_rejects_unknown_values(self):
         self.assertEqual(app_config()["LOG_LEVEL"], "INFO")
@@ -1346,6 +1361,53 @@ class StateAndSyncTests(unittest.TestCase):
         self.assertIn("Loading release metadata: 1/1", output.getvalue())
         self.assertIn("Synchronization finished", output.getvalue())
 
+    def test_cli_can_synchronize_one_release_without_listing_collection(self):
+        class DirectReleaseDiscogs(FakeDiscogs):
+            def list_collection(self, username):
+                raise AssertionError("single-release mode must not list the collection")
+
+        spotify = FakeSpotify({"The Waterfront": [candidate()]})
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "discogs2spotify.conf"
+            config_path.write_text(
+                "STATE_FILE={}\n"
+                "DRY_RUN=true\n"
+                "API_DELAY=0\n".format(Path(directory) / "state.db"),
+                encoding="utf-8",
+            )
+            output = StringIO()
+            with mock.patch.object(
+                main_module, "DiscogsClient", return_value=DirectReleaseDiscogs()
+            ), mock.patch.object(
+                main_module, "SpotifyClient", return_value=spotify
+            ), mock.patch.object(
+                main_module, "read_discogs_token", return_value="fake"
+            ), redirect_stdout(output):
+                exit_code = main_module.main(
+                    ["--config", str(config_path), "--release-id", "3812903"]
+                )
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Discogs release: 3812903", output.getvalue())
+        self.assertEqual(spotify.writes, [])
+
+    def test_file_logging_writes_to_logs_directory(self):
+        args = main_module.build_parser().parse_args(["--log-file"])
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(main_module.Path, "cwd", return_value=Path(directory)):
+                main_module._configure_logging(
+                    args, log_to_file=args.log_to_file
+                )
+                try:
+                    logging.getLogger("discogs2spotify").info("file logging test")
+                    for handler in logging.getLogger().handlers:
+                        handler.flush()
+                    log_path = Path(directory) / "logs" / "discogs2spotify.log"
+                    self.assertIn("file logging test", log_path.read_text(encoding="utf-8"))
+                finally:
+                    for handler in logging.getLogger().handlers[:]:
+                        handler.close()
+                        logging.getLogger().removeHandler(handler)
+
     def test_cli_log_level_overrides_config(self):
         args = main_module.build_parser().parse_args(["--log-level", "DEBUG"])
         main_module._configure_logging(args, "ERROR")
@@ -2032,6 +2094,41 @@ class StateAndSyncTests(unittest.TestCase):
         self.assertEqual(report.playlists_orphaned, 1)
         self.assertEqual(spotify.playlists["managed-2"]["_tracks"], [])
         self.assertIn("managed-2", spotify.playlists)
+
+    def test_single_release_sync_does_not_clean_unselected_managed_playlists(self):
+        spotify = FakeSpotify(
+            search_results={"The Waterfront": [candidate()]},
+            playlists={
+                "managed-2": {
+                    "id": "managed-2",
+                    "name": "Old record",
+                    "description": "Discogs release: 99",
+                    "_tracks": [{"uri": "spotify:track:old"}],
+                    "images": [],
+                }
+            },
+        )
+        config = app_config()
+        config["SYNC_DELETIONS"] = True
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(directory)
+            state.record_release("99", "2", "Rock", "managed-2", "Old record")
+            report = synchronize(
+                [sample_release()],
+                ["3812903"],
+                spotify,
+                FakeDiscogs(),
+                state,
+                config,
+                dry_run=False,
+                detect_orphans=False,
+            )
+            state.close()
+        self.assertEqual(report.playlists_orphaned, 0)
+        self.assertEqual(
+            spotify.playlists["managed-2"]["_tracks"],
+            [{"uri": "spotify:track:old"}],
+        )
 
     def test_unusable_artwork_does_not_replace_cover_or_abort_track_planning(self):
         release = sample_release()

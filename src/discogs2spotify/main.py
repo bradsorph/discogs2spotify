@@ -73,6 +73,13 @@ def build_parser():
     parser.add_argument("--folder", action="append", help="include this Discogs folder (repeatable)")
     parser.add_argument("--exclude", action="append", help="exclude this Discogs folder (repeatable)")
     parser.add_argument("--discogs-user", help="override DISCOGS_USER")
+    parser.add_argument(
+        "--release-id",
+        "--discogs-release",
+        dest="release_id",
+        type=_positive_int,
+        help="synchronize one Discogs release by its numeric ID",
+    )
     parser.add_argument("--state-file", help="override SQLite state path")
     parser.add_argument(
         "--max-releases",
@@ -88,10 +95,25 @@ def build_parser():
         help="set logging verbosity (overrides LOG_LEVEL in config)",
     )
     parser.add_argument("--debug", action="store_true", help="shorthand for --log-level DEBUG")
+    log_file = parser.add_mutually_exclusive_group()
+    log_file.add_argument(
+        "--log-file",
+        dest="log_to_file",
+        action="store_true",
+        default=None,
+        help="also write logs to ./logs/discogs2spotify.log",
+    )
+    log_file.add_argument(
+        "--no-log-file",
+        dest="log_to_file",
+        action="store_false",
+        default=None,
+        help="disable file logging",
+    )
     return parser
 
 
-def _configure_logging(args, configured_level="INFO"):
+def _configure_logging(args, configured_level="INFO", log_to_file=False):
     level_name = args.log_level or configured_level
     if args.debug:
         level_name = "DEBUG"
@@ -105,9 +127,23 @@ def _configure_logging(args, configured_level="INFO"):
             use_color=sys.stderr.isatty(),
         )
     )
+    handlers = [handler]
+    if log_to_file:
+        log_directory = Path.cwd() / "logs"
+        log_directory.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(
+            log_directory / "discogs2spotify.log", encoding="utf-8"
+        )
+        file_handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s %(levelname)s: %(message)s",
+                datefmt="%H:%M:%S",
+            )
+        )
+        handlers.append(file_handler)
     logging.basicConfig(
         level=getattr(logging, level_name),
-        handlers=[handler],
+        handlers=handlers,
         force=True,
     )
     logging.getLogger("PIL").setLevel(logging.WARNING)
@@ -179,7 +215,9 @@ def main(argv=None):
     process_lock = None
     try:
         config = load_config(args.config)
-        _configure_logging(args, config["LOG_LEVEL"])
+        if args.log_to_file is not None:
+            config["LOG_TO_FILE"] = args.log_to_file
+        _configure_logging(args, config["LOG_LEVEL"], config["LOG_TO_FILE"])
         logger = logging.getLogger("discogs2spotify")
         config = apply_overrides(
             config,
@@ -202,9 +240,6 @@ def main(argv=None):
 
         process_lock = SyncProcessLock(config["STATE_FILE"])
         process_lock.acquire()
-        username = str(config["DISCOGS_USER"]).strip()
-        if not username:
-            raise SyncError("Set DISCOGS_USER in discogs2spotify.conf or use --discogs-user")
         discogs_token = read_discogs_token(
             os.environ.get("DISCOGS_TOKEN_FILE", "~/.config/discogs/token")
         )
@@ -215,39 +250,59 @@ def main(argv=None):
         discogs = DiscogsClient(discogs_token, transport=discogs_transport)
         spotify = SpotifyClient(token_manager, transport=spotify_transport)
 
-        logger.info("Reading Discogs folders and collection for %s", username)
-        collection, duplicates, folders = discogs.list_collection(username)
-        logger.info(
-            "Discogs collection loaded: %d unique releases across %d folders",
-            len(collection),
-            len([folder for folder in folders if str(folder.get("id")) != "0"]),
-        )
-        if config["INCLUDE_FOLDERS"]:
-            available_folders = {
-                str(folder.get("name") or "")
-                for folder in folders
-                if str(folder.get("id")) != "0"
+        single_release = None
+        if args.release_id is not None:
+            release_id = str(args.release_id)
+            logger.info("Fetching Discogs release %s directly", release_id)
+            record = {
+                "release_id": release_id,
+                "folder_id": "0",
+                "folder_name": "Uncategorized",
+                "basic_information": {},
             }
-            unknown_folders = sorted(
-                set(config["INCLUDE_FOLDERS"]) - available_folders
-            )
-            if unknown_folders:
+            single_release = release_from_api(record, discogs.get_release(release_id))
+            collection, duplicates, folders = [record], [], []
+            selected = [record]
+            logger.info("Selected Discogs release %s", release_id)
+        else:
+            username = str(config["DISCOGS_USER"]).strip()
+            if not username:
                 raise SyncError(
-                    "Discogs include folder(s) not found: {}. Available folders: {}".format(
-                        ", ".join(unknown_folders),
-                        ", ".join(sorted(available_folders)) or "(none)",
-                    )
+                    "Set DISCOGS_USER in discogs2spotify.conf or use --discogs-user"
                 )
-        selected = filter_releases(
-            collection, config["INCLUDE_FOLDERS"], config["EXCLUDE_FOLDERS"]
-        )
-        logger.info(
-            "Selected %d of %d releases; filters include=%s exclude=%s",
-            len(selected),
-            len(collection),
-            config["INCLUDE_FOLDERS"] or "(all)",
-            config["EXCLUDE_FOLDERS"] or "(none)",
-        )
+            logger.info("Reading Discogs folders and collection for %s", username)
+            collection, duplicates, folders = discogs.list_collection(username)
+            logger.info(
+                "Discogs collection loaded: %d unique releases across %d folders",
+                len(collection),
+                len([folder for folder in folders if str(folder.get("id")) != "0"]),
+            )
+            if config["INCLUDE_FOLDERS"]:
+                available_folders = {
+                    str(folder.get("name") or "")
+                    for folder in folders
+                    if str(folder.get("id")) != "0"
+                }
+                unknown_folders = sorted(
+                    set(config["INCLUDE_FOLDERS"]) - available_folders
+                )
+                if unknown_folders:
+                    raise SyncError(
+                        "Discogs include folder(s) not found: {}. Available folders: {}".format(
+                            ", ".join(unknown_folders),
+                            ", ".join(sorted(available_folders)) or "(none)",
+                        )
+                    )
+            selected = filter_releases(
+                collection, config["INCLUDE_FOLDERS"], config["EXCLUDE_FOLDERS"]
+            )
+            logger.info(
+                "Selected %d of %d releases; filters include=%s exclude=%s",
+                len(selected),
+                len(collection),
+                config["INCLUDE_FOLDERS"] or "(all)",
+                config["EXCLUDE_FOLDERS"] or "(none)",
+            )
         report_errors = SyncReport()
         dry_run = bool(config["DRY_RUN"] or args.report)
         logger.info(
@@ -256,22 +311,33 @@ def main(argv=None):
         )
         state = StateStore(config["STATE_FILE"], readonly=dry_run)
         try:
-            target_names = playlist_names(
-                [
-                    release_from_api(record, {})
-                    for record in selected
-                ],
-                config.get("SPOTIFY_PLAYLIST_ROOT"),
-            )
-            releases, metadata_limit_reached = _load_releases(
-                discogs,
-                selected,
-                report_errors,
-                state,
-                config,
-                target_names,
-                max_releases=args.max_releases,
-            )
+            if single_release is not None:
+                stored_release = state.get_release(single_release.release_id)
+                if stored_release:
+                    single_release.folder_id = stored_release["folder_id"]
+                    single_release.folder_name = stored_release["folder_name"]
+                releases = [single_release]
+                target_names = playlist_names(
+                    releases, config.get("SPOTIFY_PLAYLIST_ROOT")
+                )
+                metadata_limit_reached = False
+            else:
+                target_names = playlist_names(
+                    [
+                        release_from_api(record, {})
+                        for record in selected
+                    ],
+                    config.get("SPOTIFY_PLAYLIST_ROOT"),
+                )
+                releases, metadata_limit_reached = _load_releases(
+                    discogs,
+                    selected,
+                    report_errors,
+                    state,
+                    config,
+                    target_names,
+                    max_releases=args.max_releases,
+                )
             report = synchronize(
                 releases,
                 [record["release_id"] for record in collection],
@@ -285,6 +351,7 @@ def main(argv=None):
                 selected_release_count=len(selected),
                 target_names=target_names,
                 metadata_limit_reached=metadata_limit_reached,
+                detect_orphans=single_release is None,
             )
         finally:
             state.close()
@@ -298,17 +365,20 @@ def main(argv=None):
                 "Discogs contained repeated release IDs across folders; synchronized one playlist per unique release"
             )
 
-        print(
-            "Folders: {} (selected: {})".format(
-                len([folder for folder in folders if str(folder.get("id")) != "0"]),
-                ", ".join(config["INCLUDE_FOLDERS"]) if config["INCLUDE_FOLDERS"] else "all except excluded",
+        if single_release is not None:
+            print("Discogs release: {}".format(single_release.release_id))
+        else:
+            print(
+                "Folders: {} (selected: {})".format(
+                    len([folder for folder in folders if str(folder.get("id")) != "0"]),
+                    ", ".join(config["INCLUDE_FOLDERS"]) if config["INCLUDE_FOLDERS"] else "all except excluded",
+                )
             )
-        )
-        print(
-            "Discogs collection: {} releases; selected: {}".format(
-                len(collection), len(selected)
+            print(
+                "Discogs collection: {} releases; selected: {}".format(
+                    len(collection), len(selected)
+                )
             )
-        )
         print_report(report, dry_run, config["SPOTIFY_PLAYLIST_ROOT"])
         logger.info("Synchronization finished")
         if report.sync_paused:

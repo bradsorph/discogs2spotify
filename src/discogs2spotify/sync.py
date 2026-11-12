@@ -661,6 +661,7 @@ def synchronize(
     selected_release_count=None,
     target_names=None,
     metadata_limit_reached=False,
+    detect_orphans=True,
 ):
     selected_count = (
         len(releases)
@@ -736,11 +737,15 @@ def synchronize(
     )
 
     existing = {str(release_id) for release_id in all_release_ids}
-    orphaned_records = [
-        record
-        for record in state.managed_releases()
-        if record["release_id"] not in existing
-    ]
+    orphaned_records = (
+        [
+            record
+            for record in state.managed_releases()
+            if record["release_id"] not in existing
+        ]
+        if detect_orphans
+        else []
+    )
     if config["SYNC_DELETIONS"] and orphaned_records and not dry_run and not state.readonly:
         print(
             "SYNC_DELETIONS enabled: will clear tracks (not delete playlists) from these managed orphans:"
