@@ -42,6 +42,17 @@ class TrackCandidate:
 
 
 @dataclass(frozen=True)
+class AlbumCandidate:
+    spotify_id: str
+    name: str
+    artist: str
+    year: Optional[int] = None
+    total_tracks: Optional[int] = None
+    album_type: str = ""
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class TrackMatch:
     status: str
     spotify_id: Optional[str] = None
@@ -68,6 +79,7 @@ class ReleasePlan:
     artwork_jpeg: Optional[bytes] = None
     cover_status: str = "MISSING"
     name_status: str = "UNCHANGED"
+    match_status: str = "NO MATCH"
     description_status: str = "UNCHANGED"
     duplicate_track_matches: int = 0
     duplicate_playlist_ids: List[str] = field(default_factory=list)

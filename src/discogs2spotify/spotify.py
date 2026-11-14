@@ -4,7 +4,7 @@ import urllib.parse
 
 from .api import HTTPTransport, json_request
 from .errors import APIError, SyncError
-from .matching import candidate_from_spotify
+from .matching import album_candidate_from_spotify, candidate_from_spotify
 
 
 def _as_bool(value, key):
@@ -117,6 +117,52 @@ class SpotifyClient:
         data = self._json(endpoint)
         results = ((data.get("tracks") or {}).get("items") or [])
         return [candidate for item in results if (candidate := candidate_from_spotify(item))]
+
+    def search_albums(self, release, limit=10):
+        query = " ".join(
+            value.strip()
+            for value in (release.artist, release.title)
+            if value and value.strip()
+        )
+        endpoint = "/search?" + urllib.parse.urlencode(
+            {"q": query, "type": "album", "limit": limit}
+        )
+        data = self._json(endpoint)
+        results = ((data.get("albums") or {}).get("items") or [])
+        return [
+            album for item in results
+            if (album := album_candidate_from_spotify(item))
+        ]
+
+    def album_tracks(self, album):
+        tracks = []
+        offset = 0
+        album_id = urllib.parse.quote(str(album.spotify_id), safe="")
+        while True:
+            page = self._json(
+                "/albums/{}/tracks?{}".format(
+                    album_id,
+                    urllib.parse.urlencode({"limit": 50, "offset": offset}),
+                )
+            )
+            items = page.get("items") or []
+            for item in items:
+                if item.get("is_playable") is False:
+                    continue
+                enriched = dict(item)
+                if not enriched.get("artists"):
+                    enriched["artists"] = [{"name": album.artist}]
+                enriched["album"] = {
+                    "name": album.name,
+                    "release_date": str(album.year or ""),
+                }
+                candidate = candidate_from_spotify(enriched)
+                if candidate:
+                    tracks.append(candidate)
+            if not page.get("next") or not items:
+                break
+            offset += len(items)
+        return tracks
 
     def create_playlist(self, name, description, public=False):
         public = _as_bool(public, "public")

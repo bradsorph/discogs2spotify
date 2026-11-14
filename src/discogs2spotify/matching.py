@@ -2,7 +2,7 @@ import re
 import unicodedata
 from difflib import SequenceMatcher
 
-from .models import TrackCandidate, TrackMatch
+from .models import AlbumCandidate, TrackCandidate, TrackMatch
 
 
 _VERSION_PATTERNS = {
@@ -64,6 +64,42 @@ def score_candidate(track, candidate):
         track.artist, candidate.artist
     ) < 0.45:
         return score, "unrelated artist"
+    return score, ""
+
+
+def score_album_candidate(release, candidate):
+    title_score = _similarity(release.title, candidate.name)
+    artist_score = _similarity(release.artist, candidate.artist)
+    if title_score is None or artist_score is None:
+        return None, "album title or artist is missing"
+    if title_score < 0.78 or artist_score < 0.72:
+        return None, "album title or artist evidence is too weak"
+
+    version_mismatch = (
+        _versions(release.title) ^ _versions(candidate.name)
+    ) & set(_VERSION_PATTERNS)
+    if version_mismatch:
+        return None, "incompatible album version: {}".format(
+            ", ".join(sorted(version_mismatch))
+        )
+    discogs_formats = [
+        str(value)
+        for item in (release.raw.get("formats") or [])
+        for value in [item.get("name")] + (item.get("descriptions") or [])
+    ]
+    discogs_is_compilation = "compilation" in normalize_text(
+        "{} {}".format(release.title, " ".join(discogs_formats))
+    )
+    if candidate.album_type.lower() == "compilation" and not discogs_is_compilation:
+        return None, "Spotify candidate is a compilation"
+
+    # Physical pressing year and country do not identify the musical album.
+    year_score = 1.0
+    if release.year and candidate.year:
+        year_score = max(0.0, 1.0 - abs(release.year - candidate.year) / 50.0)
+    score = 100.0 * (
+        title_score * 0.53 + artist_score * 0.45 + year_score * 0.02
+    )
     return score, ""
 
 
@@ -137,5 +173,30 @@ def candidate_from_spotify(item):
         artist=", ".join(str(artist.get("name") or "") for artist in artists),
         album=str(album.get("name") or ""),
         year=year,
+        raw=item,
+    )
+
+
+def album_candidate_from_spotify(item):
+    if not item or not item.get("id"):
+        return None
+    artists = item.get("artists") or []
+    release_date = str(item.get("release_date") or "")
+    year = int(release_date[:4]) if release_date[:4].isdigit() else None
+    try:
+        total_tracks = int(item.get("total_tracks"))
+    except (TypeError, ValueError):
+        total_tracks = None
+    return AlbumCandidate(
+        spotify_id=str(item["id"]),
+        name=str(item.get("name") or ""),
+        artist=", ".join(
+            str(artist.get("name") or "")
+            for artist in artists
+            if artist.get("name")
+        ),
+        year=year,
+        total_tracks=total_tracks,
+        album_type=str(item.get("album_type") or ""),
         raw=item,
     )

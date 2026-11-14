@@ -34,6 +34,7 @@ DEFAULTS = {
     "SPOTIFY_API_DELAY": 2.0,
     "OAUTH_REDIRECT_URI": "http://127.0.0.1:8888/callback",
     "LOG_LEVEL": "INFO",
+    "LOG_TO_FILE": False,
 }
 
 
@@ -138,6 +139,7 @@ def load_config(path):
         "DESCRIPTION_INCLUDE_NOTES",
         "DESCRIPTION_INCLUDE_MATRIX",
         "DESCRIPTION_INCLUDE_DISCOGS_URL",
+        "LOG_TO_FILE",
     ):
         config[key] = _as_bool(config[key], key)
     try:

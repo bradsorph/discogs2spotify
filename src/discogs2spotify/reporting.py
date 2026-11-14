@@ -23,6 +23,7 @@ def print_report(report, dry_run, root_name):
         )
         if plan.duplicate_playlist_ids:
             print("            Spotify IDs: {}".format(", ".join(plan.duplicate_playlist_ids)))
+        print("            MATCH {}".format(plan.match_status))
         print("            NAME {}".format(plan.name_status))
         print("            COVER {}".format(plan.cover_status))
         print("            DESCRIPTION {}".format(plan.description_status))

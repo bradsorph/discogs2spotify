@@ -11,10 +11,10 @@ The tool creates one playlist per unique Discogs release. It uses exact release
 IDs internally, the Discogs tracklist as the playlist order, and release-specific
 artwork and edition metadata. It does not create physical playlist folders:
 Spotify's Web API cannot manage playlist folders. Discogs folder associations
-are retained in SQLite and folder names appear in reports. Playlist names use
-the logical path `SPOTIFY_PLAYLIST_ROOT/Discogs folder/Release`, so the root and
-folder are visible in Spotify's playlist list but are not actual directories.
-Managed playlists are renamed to this path on their next synchronization.
+are retained in SQLite and included in playlist descriptions. Playlist names
+are `[SPOTIFY_PLAYLIST_ROOT]-[Artist]_[Title]`; duplicate names receive
+deterministic numeric suffixes. Managed playlists are renamed to this convention
+on their next synchronization.
 
 ## Install
 
@@ -72,6 +72,56 @@ punctuation are passed as one quoted shell argument:
 ./discogs2spotify.sh --sync --exclude For-Sale
 ```
 
+To synchronize one Discogs release directly, use its numeric release ID. This
+does not list the user's collection and does not apply collection folder
+filters:
+
+```bash
+./discogs2spotify.sh --dry-run --release-id 577332
+./discogs2spotify.sh --sync --release-id 577332
+```
+
+File logging is disabled by default. Set `LOG_TO_FILE=true` in the
+configuration, or pass `--log-file` (and `--no-log-file` to override the
+configuration); logs are also written to `./logs/discogs2spotify.log`. The
+`logs/` directory is ignored by Git.
+
+## Optional Discogs utility scripts
+
+The scripts in `utils/` are standalone helpers; they do not participate in the
+Spotify synchronization or change Discogs data.
+
+### Enrich a collection CSV
+
+`utils/discogs-enrich-collection.sh` reads a Discogs collection CSV containing
+a `release_id` column and writes a sibling file named
+`<input>-enriched.csv`. It retains the original columns and fills in additional
+release metadata, including year, country, labels, catalog numbers, format,
+genre, style, master ID, identifiers, matrix/runout, notes, and Discogs URL.
+Missing metadata columns are added to the output, and values are populated
+from each release's API response.
+
+It requires `curl`, `jq`, Python 3, and a Discogs token at
+`~/.config/discogs/token`. It makes one Discogs release API request for each
+non-empty release ID and waits one second between requests. For example:
+
+```bash
+./utils/discogs-enrich-collection.sh ./my-collection.csv
+```
+
+### Inspect individual releases
+
+`utils/discogs-release.sh` fetches one or more Discogs release IDs, saves the
+API response as JSON, and prints a readable text report for each release. It
+requires `curl` and `jq`; if `~/.config/discogs/token` exists, the script uses
+it for authenticated requests. Output is written to a `discogs-releases/`
+directory under the current working directory:
+
+```bash
+./utils/discogs-release.sh 577332
+./utils/discogs-release.sh 577332 9579823 5789680
+```
+
 For a large collection, limit each run to a number of not-yet-completed
 releases, then rerun to continue:
 
@@ -84,6 +134,12 @@ not complete are pending. The batch limit applies after this check, so a failed
 release is retried and completed releases do not use up the batch. A local
 operating-system lock prevents overlapping synchronization processes; it is
 released automatically if the process exits or is terminated.
+
+The collection folder and release-list pages are still read in full so folder
+filters and collection-level reporting remain accurate. Full release details
+are fetched incrementally and stop once the requested number of pending
+releases is found. Completed releases encountered before that point are checked
+but do not count toward the limit.
 
 Spotify can return HTTP 429 responses. Short rate limits are automatically
 retried using Spotify's `Retry-After` value. The synchronizer does not block
@@ -122,6 +178,32 @@ LOG_LEVEL=INFO
 SPOTIFY_API_DELAY=2.0
 ```
 
+`AMBIGUOUS_MATCH_ACTION` accepts:
+
+- `skip` (default): if the two highest-scoring Spotify track candidates both
+  meet `MATCH_THRESHOLD` and are less than 3 score points apart, mark the
+  track ambiguous instead of choosing one. Other tracks in the release can
+  still be synchronized.
+- `best`: in that same case, choose the highest-scoring candidate. If scores
+  tie, the candidate with the lexicographically smaller Spotify track ID wins.
+
+This setting does not relax `MATCH_THRESHOLD`: a candidate below the threshold
+is not selected by either action. Ambiguous album results fall back to
+individual track searches; this setting controls how ambiguity among those
+track candidates is handled.
+
+`MISSING_TRACK_ACTION` accepts `report` (default) or `skip`. Both leave a
+track without an accepted match out of the generated playlist sequence unless
+a previously saved Spotify mapping can be retained. `report` adds a warning
+for each missing track; `skip` suppresses those per-track warnings. Missing
+tracks are still included in the report's missing-track count.
+
+`DUPLICATE_TRACK_ACTION` accepts `skip` (default) or `allow`. When distinct
+Discogs tracks resolve to the same Spotify track URI, `skip` rejects the later
+match so that URI is not used for both tracks. `allow` keeps both occurrences
+in the playlist. Repeated Discogs entries with the same normalized title and
+artist can still appear more than once.
+
 Spotify's published rate limit uses a rolling 30-second window, but its exact
 request limit varies by app and quota mode and is not published as a fixed
 number. The client spaces Spotify requests at least 2 seconds apart by
@@ -138,6 +220,13 @@ progresses. Set `LOG_LEVEL=DEBUG` in the config, pass `--log-level DEBUG`, or
 use `--debug` for per-request and per-track diagnostics. Command-line logging
 options override the config; `--verbose` also enables per-release details.
 
+`LOG_TO_FILE` accepts `true` or `false` and defaults to `false`. When enabled,
+logs are written in addition to the console output to
+`./logs/discogs2spotify.log` (relative to the current working directory); the
+directory is created if needed and the file is appended to. Use `--log-file`
+to enable it for one run or `--no-log-file` to disable it, overriding the
+configuration value.
+
 Description settings can enable/disable playlist descriptions, catalog number,
 format, genre, style, notes, matrix, and Discogs URL. Available Discogs data is
 included without inventing fields. The release URL is included by default.
@@ -152,15 +241,19 @@ existing playlist cover is left untouched.
 
 ## Synchronization behavior and safety
 
-- Matching scores artist, title, album and year, rejects incompatible versions,
-  applies `MATCH_THRESHOLD`, and reports near-ties as ambiguous by default.
+- Matching first searches albums by artist and title, then uses album tracklist
+  overlap and the existing conservative track matcher. Uncertain album results
+  fall back to individual track searches; year is only a weak signal and
+  country is not used to identify a Spotify album.
 - Missing, ambiguous and rejected tracks are reported; a release can still
   synchronize successfully matched tracks. Unmapped current playlist entries
   are preserved rather than removed when a match failure makes their identity
   uncertain.
 - Playlist IDs are stored by Discogs release ID. If state is missing, playlists
   are recovered only when their description contains the Discogs release marker.
-  Multiple playlists claiming one release are reported and not modified.
+  Multiple playlists claiming one release are reported and not modified. A
+  stored playlist that is absent or returns HTTP 404 is treated as stale and
+  replaced only after at least one track matches.
 - A managed playlist is changed only when its ordered track URIs, generated
   description, or source artwork hash differs. Missing-track records are saved
   for later retries; successful track matches are cached and unresolved tracks

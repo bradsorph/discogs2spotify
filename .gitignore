@@ -5,3 +5,4 @@ config.yaml
 .discogs2spotify.sqlite3-journal
 state.db
 __pycache__/
+/logs/
