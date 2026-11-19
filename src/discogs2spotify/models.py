@@ -86,6 +86,7 @@ class ReleasePlan:
     unmanaged_name_collisions: List[str] = field(default_factory=list)
     error: Optional[str] = None
     cache_signatures: List[str] = field(default_factory=list)
+    force_replace_tracks: bool = False
 
 
 @dataclass

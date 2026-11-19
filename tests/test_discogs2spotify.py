@@ -271,6 +271,15 @@ class ConfigTests(unittest.TestCase):
             main_module.build_parser().parse_args(["--no-log-file"]).log_to_file
         )
 
+    def test_redo_takes_one_release_id_and_cannot_be_combined_with_release_id(self):
+        args = main_module.build_parser().parse_args(["--redo", "3812903"])
+        self.assertEqual(args.redo, 3812903)
+        self.assertIsNone(args.release_id)
+        with self.assertRaises(SystemExit):
+            main_module.build_parser().parse_args(
+                ["--redo", "3812903", "--release-id", "3812903"]
+            )
+
     def test_log_level_has_info_default_and_rejects_unknown_values(self):
         self.assertEqual(app_config()["LOG_LEVEL"], "INFO")
         with tempfile.TemporaryDirectory() as directory:
@@ -474,7 +483,7 @@ class MatchingTests(unittest.TestCase):
         release = sample_release()
         self.assertEqual(
             playlist_name(release),
-            "John Lee Hooker_The Real Folk Blues",
+            "John Lee Hooker - The Real Folk Blues",
         )
         self.assertNotIn("France", playlist_name(release))
         self.assertNotIn("1980", playlist_name(release))
@@ -488,7 +497,7 @@ class MatchingTests(unittest.TestCase):
         name = playlist_name(release, "Vinyl collection")
         self.assertEqual(
             name,
-            "Vinyl collection-John Lee Hooker_The Real Folk Blues",
+            "Vinyl collection John Lee Hooker - The Real Folk Blues",
         )
         self.assertNotIn(release.folder_name, name)
 
@@ -497,12 +506,12 @@ class MatchingTests(unittest.TestCase):
         second = sample_release("2")
         third = sample_release("3")
         expected = {
-            "2": "John Lee Hooker_The Real Folk Blues",
-            "3": "John Lee Hooker_The Real Folk Blues (2)",
-            "10": "John Lee Hooker_The Real Folk Blues (3)",
+            "2": "John Lee Hooker - The Real Folk Blues",
+            "3": "John Lee Hooker - The Real Folk Blues (2)",
+            "10": "John Lee Hooker - The Real Folk Blues (3)",
         }
         expected = {
-            release_id: "Vinyl collection-" + name
+            release_id: "Vinyl collection " + name
             for release_id, name in expected.items()
         }
         self.assertEqual(playlist_names([first, second, third], "Vinyl collection"), expected)
@@ -1069,11 +1078,11 @@ class StateAndSyncTests(unittest.TestCase):
         self.assertEqual(report.playlists_created, 2)
         self.assertEqual(
             first_record["playlist_name"],
-            "My_record_collection-John Lee Hooker_The Real Folk Blues (2)",
+            "My_record_collection John Lee Hooker - The Real Folk Blues (2)",
         )
         self.assertEqual(
             second_record["playlist_name"],
-            "My_record_collection-John Lee Hooker_The Real Folk Blues",
+            "My_record_collection John Lee Hooker - The Real Folk Blues",
         )
         self.assertNotEqual(first_record["playlist_id"], second_record["playlist_id"])
 
@@ -1108,7 +1117,7 @@ class StateAndSyncTests(unittest.TestCase):
             state.close()
         self.assertEqual(
             playlist["name"],
-            "Vinyl collection-John Lee Hooker_The Real Folk Blues",
+            "Vinyl collection John Lee Hooker - The Real Folk Blues",
         )
         self.assertEqual(report.playlists_updated, 1)
         self.assertEqual(report.plans[0].name_status, "UPDATED")
@@ -1384,7 +1393,7 @@ class StateAndSyncTests(unittest.TestCase):
                 main_module, "read_discogs_token", return_value="fake"
             ), redirect_stdout(output):
                 exit_code = main_module.main(
-                    ["--config", str(config_path), "--release-id", "3812903"]
+                ["--config", str(config_path), "--redo", "3812903"]
                 )
         self.assertEqual(exit_code, 0)
         self.assertIn("Discogs release: 3812903", output.getvalue())
@@ -1506,6 +1515,31 @@ class StateAndSyncTests(unittest.TestCase):
         self.assertEqual(first.artwork_updates, 1)
         self.assertEqual(second.artwork_updates, 0)
         self.assertEqual(second.description_updates, 0)
+
+    def test_redo_forces_replacing_tracks_for_a_completed_release(self):
+        release = sample_release()
+        spotify = FakeSpotify({"The Waterfront": [candidate()]})
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(directory)
+            first = synchronize(
+                [release], ["3812903"], spotify, FakeDiscogs(), state,
+                app_config(), dry_run=False,
+            )
+            previous_writes = list(spotify.writes)
+            redo = synchronize(
+                [release], ["3812903"], spotify, FakeDiscogs(), state,
+                app_config(), dry_run=False, redo_release_id="3812903",
+            )
+            state.close()
+        self.assertEqual(first.playlists_created, 1)
+        self.assertEqual(redo.releases_processed, 1)
+        self.assertEqual(redo.playlists_updated, 1)
+        self.assertEqual(spotify.writes[:len(previous_writes)], previous_writes)
+        self.assertEqual(
+            spotify.writes[-1],
+            ("tracks", "created-1", ["spotify:track:spotify-1"]),
+        )
+        self.assertEqual(spotify.search_calls, ["The Waterfront"])
 
     def test_successful_track_mapping_is_reused_without_searching_again(self):
         release = sample_release()

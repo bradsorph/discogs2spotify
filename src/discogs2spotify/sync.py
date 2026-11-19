@@ -284,6 +284,7 @@ def _release_sync_signature(release, config, target_playlist_name=None):
 def build_release_plan(
     release, spotify, discogs, state, config, playlists_by_release,
     report, dry_run=True, unmanaged_names=None, target_playlist_name=None,
+    force_replace_tracks=False,
 ):
     target_playlist_name = target_playlist_name or playlist_name(
         release, config.get("SPOTIFY_PLAYLIST_ROOT")
@@ -433,7 +434,10 @@ def build_release_plan(
             artwork_jpeg = None
             cover_status = "MISSING"
 
-    tracklist_changed = desired_uris != current_uris
+    tracklist_changed = (
+        desired_uris != current_uris
+        or (force_replace_tracks and bool(playlist_id))
+    )
     description_changed = description_status in ("CREATED", "UPDATED")
     cover_changed = cover_status in ("CREATED", "UPDATED")
     if playlist_id and (
@@ -464,6 +468,7 @@ def build_release_plan(
         description_status=description_status,
         duplicate_track_matches=duplicate_tracks,
         cache_signatures=cache_signatures,
+        force_replace_tracks=force_replace_tracks and bool(playlist_id),
     )
 
 
@@ -571,7 +576,7 @@ def _apply_plan(
     elif config["PLAYLIST_DESCRIPTION"] and plan.description_status == "UNCHANGED":
         state.update_hashes(release.release_id, description_hash=plan.description_hash)
 
-    if plan.desired_uris != plan.current_uris and (
+    if (plan.force_replace_tracks or plan.desired_uris != plan.current_uris) and (
         plan.desired_uris or not release.tracks
     ):
         spotify.replace_tracks(playlist_id, plan.desired_uris)
@@ -662,6 +667,7 @@ def synchronize(
     target_names=None,
     metadata_limit_reached=False,
     detect_orphans=True,
+    redo_release_id=None,
 ):
     selected_count = (
         len(releases)
@@ -693,6 +699,8 @@ def synchronize(
             release.release_id, signatures[release.release_id]
         )
     }
+    if redo_release_id is not None:
+        completed_ids.discard(str(redo_release_id))
     report.releases_completed = len(completed_ids)
     report.releases_pending = max(0, selected_count - len(completed_ids))
     pending_releases = [
@@ -800,6 +808,9 @@ def synchronize(
                         dry_run,
                         unmanaged_names,
                         target_names[release.release_id],
+                        force_replace_tracks=(
+                            str(release.release_id) == str(redo_release_id)
+                        ),
                     )
                     report.plans.append(plan)
                     if plan.playlist_action == "COLLISION":
