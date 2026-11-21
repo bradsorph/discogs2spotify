@@ -12,9 +12,10 @@ IDs internally, the Discogs tracklist as the playlist order, and release-specifi
 artwork and edition metadata. It does not create physical playlist folders:
 Spotify's Web API cannot manage playlist folders. Discogs folder associations
 are retained in SQLite and included in playlist descriptions. Playlist names
-are `[SPOTIFY_PLAYLIST_ROOT]-[Artist]_[Title]`; duplicate names receive
-deterministic numeric suffixes. Managed playlists are renamed to this convention
-on their next synchronization.
+are `SPOTIFY_PLAYLIST_ROOT Artist - Title` when a root is configured, or
+`Artist - Title` otherwise; duplicate names receive deterministic numeric
+suffixes. Managed playlists are renamed to this convention on their next
+synchronization.
 
 ## Install
 
@@ -79,6 +80,15 @@ filters:
 ```bash
 ./discogs2spotify.sh --dry-run --release-id 577332
 ./discogs2spotify.sh --sync --release-id 577332
+```
+
+To force a rebuild of one release's playlist tracklist while keeping the
+playlist itself, use `--redo` with the numeric Discogs release ID. As with
+other changes, `--sync` is required to apply it; without `--sync`, the default
+dry run only previews the rebuild:
+
+```bash
+./discogs2spotify.sh --sync --redo 577332
 ```
 
 File logging is disabled by default. Set `LOG_TO_FILE=true` in the

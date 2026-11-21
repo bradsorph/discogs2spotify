@@ -17,12 +17,12 @@ def _safe_component(value):
 
 def playlist_name(release, root=None):
     parts = [_safe_component(release.artist), _safe_component(release.title)]
-    name = "_".join(part for part in parts if part)
+    name = " - ".join(part for part in parts if part)
     if not name:
         name = "Discogs release {}".format(release.release_id)
     safe_root = _safe_component(root)
     if safe_root:
-        name = safe_root + "-" + name
+        name = safe_root + " " + name
     if len(name) > 100:
         name = name[:97].rstrip(" _.-") + "..."
     return name

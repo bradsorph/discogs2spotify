@@ -73,12 +73,18 @@ def build_parser():
     parser.add_argument("--folder", action="append", help="include this Discogs folder (repeatable)")
     parser.add_argument("--exclude", action="append", help="exclude this Discogs folder (repeatable)")
     parser.add_argument("--discogs-user", help="override DISCOGS_USER")
-    parser.add_argument(
+    release_target = parser.add_mutually_exclusive_group()
+    release_target.add_argument(
         "--release-id",
         "--discogs-release",
         dest="release_id",
         type=_positive_int,
         help="synchronize one Discogs release by its numeric ID",
+    )
+    release_target.add_argument(
+        "--redo",
+        type=_positive_int,
+        help="force a full tracklist rebuild for one Discogs release ID",
     )
     parser.add_argument("--state-file", help="override SQLite state path")
     parser.add_argument(
@@ -251,8 +257,11 @@ def main(argv=None):
         spotify = SpotifyClient(token_manager, transport=spotify_transport)
 
         single_release = None
-        if args.release_id is not None:
-            release_id = str(args.release_id)
+        requested_release_id = (
+            args.redo if args.redo is not None else args.release_id
+        )
+        if requested_release_id is not None:
+            release_id = str(requested_release_id)
             logger.info("Fetching Discogs release %s directly", release_id)
             record = {
                 "release_id": release_id,
@@ -352,6 +361,9 @@ def main(argv=None):
                 target_names=target_names,
                 metadata_limit_reached=metadata_limit_reached,
                 detect_orphans=single_release is None,
+                redo_release_id=(
+                    str(args.redo) if args.redo is not None else None
+                ),
             )
         finally:
             state.close()
