@@ -1,0 +1,15 @@
+{
+  "errors": [],
+  "warnings": [],
+  "information": [
+    {
+      "code": "COLLECTION_SUMMARY",
+      "release_count": 346,
+      "excluded_release_count": 18,
+      "taxonomy_node_count": 101,
+      "relation_count": 0,
+      "represented_node_count": 96,
+      "unmapped_source_value_count": 0
+    }
+  ]
+}

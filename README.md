@@ -295,7 +295,6 @@ error totals.
 ```bash
 python3 -m unittest discover -s tests -v
 bash -n discogs2spotify.sh
-bash -n sync-playlists.sh
 python3 -m compileall -q src discogs2spotify.py
 ```
 

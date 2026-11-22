@@ -1,0 +1,611 @@
+{
+  "schema_version": "1.0",
+  "nodes": [
+    {
+      "id": "acid_rock",
+      "name": "Acid Rock",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "acoustic",
+      "name": "Acoustic",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "aor",
+      "name": "AOR",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "arena_rock",
+      "name": "Arena Rock",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "art_rock",
+      "name": "Art Rock",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "avantgarde",
+      "name": "Avantgarde",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "ballad",
+      "name": "Ballad",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "baroque",
+      "name": "Baroque",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "beat",
+      "name": "Beat",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "big_band",
+      "name": "Big Band",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "blues",
+      "name": "Blues",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "blues_rock",
+      "name": "Blues Rock",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "boogie_woogie",
+      "name": "Boogie Woogie",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "bop",
+      "name": "Bop",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "cajun",
+      "name": "Cajun",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "calypso",
+      "name": "Calypso",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "celtic",
+      "name": "Celtic",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "chanson",
+      "name": "Chanson",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "chicago_blues",
+      "name": "Chicago Blues",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "classic_rock",
+      "name": "Classic Rock",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "classical",
+      "name": "Classical",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "country",
+      "name": "Country",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "country_blues",
+      "name": "Country Blues",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "country_rock",
+      "name": "Country Rock",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "delta_blues",
+      "name": "Delta Blues",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "dialogue",
+      "name": "Dialogue",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "disco",
+      "name": "Disco",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "dixieland",
+      "name": "Dixieland",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "doom_metal",
+      "name": "Doom Metal",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "easy_listening",
+      "name": "Easy Listening",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "electric_blues",
+      "name": "Electric Blues",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "electronic",
+      "name": "Electronic",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "europop",
+      "name": "Europop",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "experimental",
+      "name": "Experimental",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "folk",
+      "name": "Folk",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "folk_rock",
+      "name": "Folk Rock",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "folk_world_and_country",
+      "name": "Folk, World, & Country",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "funk",
+      "name": "Funk",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "funk_metal",
+      "name": "Funk Metal",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "funk_soul",
+      "name": "Funk / Soul",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "fusion",
+      "name": "Fusion",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "garage_rock",
+      "name": "Garage Rock",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "glam",
+      "name": "Glam",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "gospel",
+      "name": "Gospel",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "gypsy_jazz",
+      "name": "Gypsy Jazz",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "hard_rock",
+      "name": "Hard Rock",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "harmonica_blues",
+      "name": "Harmonica Blues",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "heavy_metal",
+      "name": "Heavy Metal",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "holiday",
+      "name": "Holiday",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "instrumental",
+      "name": "Instrumental",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "italo_disco",
+      "name": "Italo-Disco",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "jazz",
+      "name": "Jazz",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "jazz_funk",
+      "name": "Jazz-Funk",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "jazz_rock",
+      "name": "Jazz-Rock",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "latin",
+      "name": "Latin",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "latin_jazz",
+      "name": "Latin Jazz",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "mambo",
+      "name": "Mambo",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "medieval",
+      "name": "Medieval",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "minneapolis_sound",
+      "name": "Minneapolis Sound",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "modern_classical",
+      "name": "Modern Classical",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "modern_electric_blues",
+      "name": "Modern Electric Blues",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "monolog",
+      "name": "Monolog",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "music_hall",
+      "name": "Music Hall",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "musical",
+      "name": "Musical",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "new_wave",
+      "name": "New Wave",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "non_music",
+      "name": "Non-Music",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "nueva_cancion",
+      "name": "Nueva Cancion",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "opera",
+      "name": "Opera",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "orchestra",
+      "name": "Orchestra",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "parody",
+      "name": "Parody",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "piano_blues",
+      "name": "Piano Blues",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "piedmont_blues",
+      "name": "Piedmont Blues",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "pop",
+      "name": "Pop",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "pop_rock",
+      "name": "Pop Rock",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "prog_rock",
+      "name": "Prog Rock",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "psychedelic_rock",
+      "name": "Psychedelic Rock",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "reggae",
+      "name": "Reggae",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "religious",
+      "name": "Religious",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "rhythm_and_blues",
+      "name": "Rhythm & Blues",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "rock",
+      "name": "Rock",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "rock_and_roll",
+      "name": "Rock & Roll",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "romantic",
+      "name": "Romantic",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "score",
+      "name": "Score",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "ska",
+      "name": "Ska",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "smooth_jazz",
+      "name": "Smooth Jazz",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "soft_rock",
+      "name": "Soft Rock",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "soul",
+      "name": "Soul",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "soul_jazz",
+      "name": "Soul-Jazz",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "soundtrack",
+      "name": "Soundtrack",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "southern_rock",
+      "name": "Southern Rock",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "speed_metal",
+      "name": "Speed Metal",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "stage_and_screen",
+      "name": "Stage & Screen",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "story",
+      "name": "Story",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "surf",
+      "name": "Surf",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "swamp_pop",
+      "name": "Swamp Pop",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "swing",
+      "name": "Swing",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "symphonic_rock",
+      "name": "Symphonic Rock",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "synth_pop",
+      "name": "Synth-pop",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "theme",
+      "name": "Theme",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "thrash",
+      "name": "Thrash",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    },
+    {
+      "id": "vocal",
+      "name": "Vocal",
+      "category": "discogs_value",
+      "description": "Canonical node for the observed Discogs genre/style value."
+    }
+  ]
+}

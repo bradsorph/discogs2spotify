@@ -25,3 +25,11 @@ SPOTIFY_API_DELAY: 2.0
 OAUTH_REDIRECT_URI: http://127.0.0.1:8888/callback
 LOG_LEVEL: INFO
 LOG_TO_FILE: false
+
+# Discogs2Graph paths (relative to this configuration file unless absolute).
+MUSIC_MAP_INPUT: data/collection.csv
+MUSIC_MAP_TAXONOMY: data/taxonomy.json
+MUSIC_MAP_RELATIONS: data/relations.json
+MUSIC_MAP_OUTPUT: output/collection_map.json
+MUSIC_MAP_REPORT: output/validation_report.json
+MUSIC_MAP_AMBIGUOUS_OUTPUT: output/ambiguous_mappings.json
